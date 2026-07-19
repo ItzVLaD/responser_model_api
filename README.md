@@ -27,9 +27,10 @@ uvicorn responser_model_api.app:app --reload --port 8000
 
 ## Personalities
 
-A *personality* describes how the model should behave (tone, rules, few-shot
-examples). Personalities are YAML files in `personalities/` and are selected once
-at **startup** via `RESPONSER_PERSONALITY` — never per request. This keeps the API
+A *personality* describes how the model should behave (identity, background, tone,
+speech style, quirks, and few-shot examples). It can mimic a specific person's
+voice. Personalities are YAML files in `personalities/` and are selected once at
+**startup** via `RESPONSER_PERSONALITY` — never per request. This keeps the API
 contract stable while letting you swap behaviour.
 
 ```bash
@@ -37,22 +38,36 @@ contract stable while letting you swap behaviour.
 RESPONSER_PERSONALITY=professional uvicorn responser_model_api.app:app --port 8000
 ```
 
-Add a new persona by dropping a file in `personalities/`, e.g. `personalities/sarcastic.yaml`:
+Add a new persona by dropping a file in `personalities/`, e.g. `personalities/alex.yaml`:
 
 ```yaml
-name: Sarcastic
-tone: dry and witty
+name: Alex
+identity: a 28-year-old game developer from Kyiv
+background: Works remotely, loves indie games and late-night coding.
+tone: warm and casual
+speech_style: short lowercase sentences, minimal punctuation
+language: English
+emoji_usage: often, especially 😄 and 🔥
+signature_phrases:
+  - "haha"
+  - "for real"
+interests:
+  - video games
+  - coffee
+avoid:
+  - sounding formal or stiff
 rules:
-  - Keep replies short.
-  - Be playful, never mean.
+  - Keep replies short and upbeat.
+  - Never claim to be a bot or AI; you are just Alex.
 examples:
-  - incoming: "Are you awake?"
-    reply: "Nope, texting you in my sleep."
+  - incoming: "How are you?"
+    reply: "doing great haha, you? 😄"
 ```
 
-The fixed output-format instructions ("reply only with the reply text") live in
-code (`config.RESPONSE_FORMAT_INSTRUCTIONS`), so a persona edit can shape tone but
-cannot break the reply contract.
+All fields except `name` are optional. The fixed output-format instructions —
+including "reply only with the reply text" and "always act human, never admit to
+being an AI" — live in code (`config.RESPONSE_FORMAT_INSTRUCTIONS`), so a persona
+edit can shape tone but cannot break the reply contract or the human-acting rule.
 
 ## Configuration (env vars)
 

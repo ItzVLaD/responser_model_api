@@ -9,14 +9,27 @@ reply contract.
 
 Example ``personalities/friendly.yaml``::
 
-    name: Friendly
+    name: Alex
+    identity: a 28-year-old game developer from Dublin
+    background: Works remotely, loves indie games and late-night coding.
     tone: warm and casual
+    speech_style: short lowercase sentences, minimal punctuation
+    language: English
+    emoji_usage: often, especially 😄 and 🔥
+    signature_phrases:
+      - "haha"
+      - "for real"
+    interests:
+      - video games
+      - coffee
+    avoid:
+      - being formal or stiff
     rules:
       - Keep replies short and upbeat.
       - Never be rude, even to rude messages.
     examples:
       - incoming: "How are you?"
-        reply: "Doing great, thanks! How about you?"
+        reply: "doing great haha, you? 😄"
 """
 
 from __future__ import annotations
@@ -35,21 +48,82 @@ class PersonalityExample(BaseModel):
 
 
 class Personality(BaseModel):
-    """A behaviour profile for reply generation."""
+    """A behaviour profile for reply generation.
 
+    The fields aim to capture *who* is replying richly enough to mimic a
+    specific person's voice: their identity, background, how they speak, and the
+    little habits that make their messages recognizable.
+    """
+
+    # Who the persona is.
     name: str
+    # A short identity line, e.g. "Alex, a 28-year-old game developer from Dublin".
+    identity: str = ""
+    # Free-form background/biography the model can draw on for context.
+    background: str = ""
+
+    # How the persona communicates.
     tone: str = ""
+    # Concrete description of speech style: sentence length, punctuation habits,
+    # capitalization, slang, formality, etc.
+    speech_style: str = ""
+    # Language(s) the persona writes in (e.g. "English", "casual Irish English").
+    language: str = ""
+    # How the persona uses emojis (e.g. "rarely", "loves 😂 and 🔥").
+    emoji_usage: str = ""
+    # Recognizable catchphrases or filler words the persona often uses.
+    signature_phrases: list[str] = Field(default_factory=list)
+    # Topics/interests the persona talks about comfortably.
+    interests: list[str] = Field(default_factory=list)
+    # Things the persona avoids saying or doing.
+    avoid: list[str] = Field(default_factory=list)
+
+    # Explicit behaviour rules and few-shot examples.
     rules: list[str] = Field(default_factory=list)
     examples: list[PersonalityExample] = Field(default_factory=list)
 
     def to_system_prompt(self) -> str:
         """Render the persona as a human-readable system-prompt fragment."""
-        parts: list[str] = [f"Your persona is '{self.name}'."]
+        parts: list[str] = []
+
+        # Identity block: establish who is speaking.
+        identity_line = f"You are {self.name}"
+        if self.identity:
+            identity_line += f", {self.identity}"
+        identity_line += "."
+        parts.append(identity_line)
+
+        if self.background:
+            parts.append(f"Background: {self.background}")
+
+        # Voice block: how this person writes.
+        voice: list[str] = []
         if self.tone:
-            parts.append(f"Tone: {self.tone}.")
+            voice.append(f"Tone: {self.tone}.")
+        if self.speech_style:
+            voice.append(f"Speech style: {self.speech_style}.")
+        if self.language:
+            voice.append(f"Write in {self.language}.")
+        if self.emoji_usage:
+            voice.append(f"Emoji use: {self.emoji_usage}.")
+        if voice:
+            parts.append(" ".join(voice))
+
+        if self.signature_phrases:
+            phrases = ", ".join(f'"{p}"' for p in self.signature_phrases)
+            parts.append(f"Occasionally use signature phrases like {phrases}.")
+
+        if self.interests:
+            parts.append(f"You are comfortable talking about: {', '.join(self.interests)}.")
+
+        if self.avoid:
+            avoid = "\n".join(f"- {item}" for item in self.avoid)
+            parts.append(f"Avoid the following:\n{avoid}")
+
         if self.rules:
             rules = "\n".join(f"- {rule}" for rule in self.rules)
             parts.append(f"Follow these rules:\n{rules}")
+
         return "\n\n".join(parts)
 
 

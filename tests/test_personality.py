@@ -62,6 +62,36 @@ def test_system_prompt_layers_format_over_persona() -> None:
     assert "Be kind." in prompt
 
 
+def test_system_prompt_includes_rich_identity_fields() -> None:
+    persona = Personality(
+        name="Alex",
+        identity="a 28-year-old game developer",
+        background="Loves indie games.",
+        speech_style="short lowercase sentences",
+        language="English",
+        emoji_usage="often 😄",
+        signature_phrases=["haha", "for real"],
+        interests=["games", "coffee"],
+        avoid=["being formal"],
+    )
+    prompt = persona.to_system_prompt()
+    assert "You are Alex, a 28-year-old game developer." in prompt
+    assert "Loves indie games." in prompt
+    assert "short lowercase sentences" in prompt
+    assert "English" in prompt
+    assert "😄" in prompt
+    assert '"haha"' in prompt
+    assert "games, coffee" in prompt
+    assert "being formal" in prompt
+
+
+def test_format_instructions_enforce_human_act() -> None:
+    # The model must always deny being an AI and act human.
+    lowered = RESPONSE_FORMAT_INSTRUCTIONS.lower()
+    assert "human" in lowered
+    assert "never an ai" in lowered or "deny being ai" in lowered
+
+
 def test_examples_become_fewshot_turns() -> None:
     persona = Personality(
         name="Friendly",
