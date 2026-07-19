@@ -80,10 +80,34 @@ edit can shape tone but cannot break the reply contract or the human-acting rule
 | `RESPONSER_MAX_OUTPUT_TOKENS`| `256`                    | Max tokens per reply                      |
 | `RESPONSER_PERSONALITY`      | `friendly`               | Which `personalities/<name>.yaml` to use |
 | `RESPONSER_PERSONALITIES_DIR`| `./personalities`        | Folder holding personality YAML files    |
+| `RESPONSER_LOG_LEVEL`        | `INFO`                   | Log level (DEBUG, INFO, WARNING, ...)     |
+| `RESPONSER_LOG_FILE`         | *(unset)*                | Also write logs to this file              |
+| `RESPONSER_LOG_PROMPTS`      | `false`                  | DEBUG-log full prompts + raw output       |
 
 > Model inference parameters (model, temperature, top-p, max tokens) are an
 > internal concern of this service and are **not** part of the HTTP contract; the
 > web reader never sends them.
+
+## Logging & debugging
+
+The service logs to stderr (and optionally a file). This is the main tool for
+debugging and tuning how the model responds:
+
+```bash
+# see full prompts + raw completions while iterating on personas/params
+RESPONSER_LOG_LEVEL=DEBUG RESPONSER_LOG_PROMPTS=true \
+  uvicorn responser_model_api.app:app --port 8000
+```
+
+- **INFO** logs each request (persona, platform, chat, message count, model,
+  temperature), the generation time, token counts, and the final reply. Refusal
+  detection and fallbacks are logged as **WARNING**.
+- **DEBUG** with `RESPONSER_LOG_PROMPTS=true` additionally logs the full assembled
+  prompt and the raw model output — invaluable for understanding *why* the model
+  answered a certain way.
+
+> Privacy: prompts contain private chat content, so prompt logging is **off by
+> default** and must be explicitly enabled.
 
 ## Test
 

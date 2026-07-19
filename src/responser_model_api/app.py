@@ -9,8 +9,11 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 
 from .config import load_active_personality, load_generation_settings
+from .logging_config import configure_logging
 from .ollama_client import OllamaReplyGenerator
 from .schemas import GenerateReplyRequest, GeneratedReply
+
+log = configure_logging()
 
 app = FastAPI(
     title="Responser Model API",
@@ -23,6 +26,12 @@ app = FastAPI(
 _personality = load_active_personality()
 _settings = load_generation_settings()
 _generator = OllamaReplyGenerator(personality=_personality, settings=_settings)
+log.info(
+    "model API ready: personality=%s model=%s temperature=%.2f",
+    _personality.name,
+    _settings.model_name,
+    _settings.temperature,
+)
 
 
 @app.get("/health")
@@ -35,6 +44,7 @@ def generate_reply(request: GenerateReplyRequest) -> GeneratedReply:
     try:
         reply = _generator.generate(request.snapshot)
     except Exception as exc:  # surface Ollama/model errors as 502
+        log.exception("generation failed")
         raise HTTPException(status_code=502, detail=f"generation failed: {exc}") from exc
 
     return reply

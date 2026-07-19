@@ -2,11 +2,47 @@
 
 from __future__ import annotations
 
+import time
+
 from ollama import Client
 
 from .config import OLLAMA_HOST, RESPONSE_FORMAT_INSTRUCTIONS, GenerationSettings
+from .logging_config import LOG_PROMPTS, get_logger
 from .personality import Personality
 from .schemas import ChatSnapshot, GeneratedReply
+
+log = get_logger()
+
+# Boilerplate that means the model's built-in alignment kicked in and it broke
+# character with an AI/assistant-style refusal instead of replying as the person.
+# Matching any of these triggers a regeneration (and, failing that, a fallback).
+_REFUSAL_MARKERS: tuple[str, ...] = (
+    "i cannot",
+    "i can't fulfill",
+    "i can't help with",
+    "i can not",
+    "i'm not able to",
+    "i am not able to",
+    "i'm unable to",
+    "as an ai",
+    "as a language model",
+    "i'm just an ai",
+    "is there anything else i can help you with",
+    "i can't create content",
+    "i cannot create content",
+    "i can't write a response",
+    "i cannot write a response",
+    "i can't engage with",
+)
+
+# Neutral, in-character-ish deflection used only if the model keeps refusing.
+# Deliberately vague so it fits most personas without generating any real content.
+_DEFLECTION_FALLBACK = "haha nah, let's not go there. anyway, what else is up?"
+
+
+def _looks_like_refusal(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in _REFUSAL_MARKERS)
 
 
 def _system_prompt(personality: Personality) -> str:
@@ -71,8 +107,69 @@ class OllamaReplyGenerator:
 
     def generate(self, snapshot: ChatSnapshot) -> GeneratedReply:
         messages = _snapshot_to_messages(snapshot, self._personality)
+        log.info(
+            "generate: persona=%s platform=%s chat=%r messages=%d model=%s temp=%.2f",
+            self._personality.name,
+            snapshot.platform,
+            snapshot.chat.title,
+            len(snapshot.messages),
+            self._settings.model_name,
+            self._settings.temperature,
+        )
+        if LOG_PROMPTS:
+            log.debug("prompt messages: %s", messages)
+
+        started = time.monotonic()
+        response = self._chat(messages)
+        text = response["message"]["content"].strip()
+        if LOG_PROMPTS:
+            log.debug("raw completion: %r", text)
+
+        # If the model's alignment produced an out-of-character AI refusal, nudge
+        # it once to answer as the person; if it still refuses, deflect in a
+        # neutral, human way rather than shipping assistant boilerplate.
+        if _looks_like_refusal(text):
+            log.warning("refusal detected; regenerating in character")
+            nudge = messages + [
+                {
+                    "role": "system",
+                    "content": (
+                        "That last reply was an out-of-character AI refusal. "
+                        f"Reply again as {self._personality.name}, a real person. "
+                        "Do not use any AI disclaimers. If you would rather not "
+                        "engage, just brush it off, joke, or change the subject "
+                        "like a human would."
+                    ),
+                }
+            ]
+            response = self._chat(nudge)
+            retry_text = response["message"]["content"].strip()
+            if _looks_like_refusal(retry_text):
+                log.warning("retry still refused; using deflection fallback")
+                text = _DEFLECTION_FALLBACK
+            else:
+                text = retry_text
+
+        elapsed_ms = (time.monotonic() - started) * 1000
+        log.info(
+            "generated in %.0fms: prompt_tokens=%s completion_tokens=%s reply=%r",
+            elapsed_ms,
+            response.get("prompt_eval_count"),
+            response.get("eval_count"),
+            text,
+        )
+
+        return GeneratedReply(
+            text=text,
+            model_name=self._settings.model_name,
+            prompt_tokens=response.get("prompt_eval_count"),
+            completion_tokens=response.get("eval_count"),
+            finish_reason=response.get("done_reason"),
+        )
+
+    def _chat(self, messages: list[dict[str, str]]):
         settings = self._settings
-        response = self._client.chat(
+        return self._client.chat(
             model=settings.model_name,
             messages=messages,
             options={
@@ -80,12 +177,4 @@ class OllamaReplyGenerator:
                 "top_p": settings.top_p,
                 "num_predict": settings.max_output_tokens,
             },
-        )
-
-        return GeneratedReply(
-            text=response["message"]["content"].strip(),
-            model_name=settings.model_name,
-            prompt_tokens=response.get("prompt_eval_count"),
-            completion_tokens=response.get("eval_count"),
-            finish_reason=response.get("done_reason"),
         )
