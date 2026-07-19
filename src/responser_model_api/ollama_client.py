@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from ollama import Client
 
-from .config import OLLAMA_HOST, RESPONSE_FORMAT_INSTRUCTIONS
+from .config import OLLAMA_HOST, RESPONSE_FORMAT_INSTRUCTIONS, GenerationSettings
 from .personality import Personality
-from .schemas import ChatSnapshot, GeneratedReply, GenerationConfig
+from .schemas import ChatSnapshot, GeneratedReply
 
 
 def _system_prompt(personality: Personality) -> str:
@@ -42,25 +42,32 @@ def _snapshot_to_messages(
 
 
 class OllamaReplyGenerator:
-    def __init__(self, personality: Personality, host: str = OLLAMA_HOST) -> None:
+    def __init__(
+        self,
+        personality: Personality,
+        settings: GenerationSettings,
+        host: str = OLLAMA_HOST,
+    ) -> None:
         self._personality = personality
+        self._settings = settings
         self._client = Client(host=host)
 
-    def generate(self, snapshot: ChatSnapshot, config: GenerationConfig) -> GeneratedReply:
+    def generate(self, snapshot: ChatSnapshot) -> GeneratedReply:
         messages = _snapshot_to_messages(snapshot, self._personality)
+        settings = self._settings
         response = self._client.chat(
-            model=config.model_name,
+            model=settings.model_name,
             messages=messages,
             options={
-                "temperature": config.temperature,
-                "top_p": config.top_p,
-                "num_predict": config.max_output_tokens,
+                "temperature": settings.temperature,
+                "top_p": settings.top_p,
+                "num_predict": settings.max_output_tokens,
             },
         )
 
         return GeneratedReply(
             text=response["message"]["content"].strip(),
-            model_name=config.model_name,
+            model_name=settings.model_name,
             prompt_tokens=response.get("prompt_eval_count"),
             completion_tokens=response.get("eval_count"),
             finish_reason=response.get("done_reason"),

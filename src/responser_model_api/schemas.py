@@ -32,16 +32,11 @@ class ChatSnapshot(BaseModel):
     messages: list[Message] = Field(default_factory=list)
 
 
-class GenerationConfig(BaseModel):
-    model_name: str = "llama3.2:3b"
-    temperature: float = 0.3
-    max_output_tokens: int = 256
-    top_p: float = 0.9
-
-
 class GenerateReplyRequest(BaseModel):
     snapshot: ChatSnapshot
-    config: Optional[GenerationConfig] = None
+    # `dry_run` lets a caller request a candidate reply without implying it will
+    # be sent. Model inference parameters (model, temperature, ...) are NOT part
+    # of this contract: they are an internal concern of the model API.
     dry_run: bool = False
 
 

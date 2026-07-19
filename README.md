@@ -75,8 +75,15 @@ edit can shape tone but cannot break the reply contract or the human-acting rule
 |------------------------------|--------------------------|------------------------------------------|
 | `OLLAMA_HOST`                | `http://localhost:11434` | Where Ollama is listening                |
 | `RESPONSER_MODEL`            | `llama3.2:3b`            | Default model name                       |
+| `RESPONSER_TEMPERATURE`      | `0.7`                    | Sampling temperature (higher = more varied) |
+| `RESPONSER_TOP_P`            | `0.9`                    | Nucleus sampling cutoff                   |
+| `RESPONSER_MAX_OUTPUT_TOKENS`| `256`                    | Max tokens per reply                      |
 | `RESPONSER_PERSONALITY`      | `friendly`               | Which `personalities/<name>.yaml` to use |
 | `RESPONSER_PERSONALITIES_DIR`| `./personalities`        | Folder holding personality YAML files    |
+
+> Model inference parameters (model, temperature, top-p, max tokens) are an
+> internal concern of this service and are **not** part of the HTTP contract; the
+> web reader never sends them.
 
 ## Test
 

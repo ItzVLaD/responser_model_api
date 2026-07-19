@@ -21,8 +21,8 @@ def test_health() -> None:
 
 
 def test_generate_reply(monkeypatch) -> None:
-    def fake_generate(snapshot, config):
-        return GeneratedReply(text="hello there", model_name=config.model_name)
+    def fake_generate(snapshot):
+        return GeneratedReply(text="hello there", model_name="stub")
 
     monkeypatch.setattr(app_module._generator, "generate", fake_generate)
 
