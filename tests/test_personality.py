@@ -98,7 +98,7 @@ def test_examples_become_fewshot_turns() -> None:
         examples=[{"incoming": "hi", "reply": "hey!"}],
     )
     snapshot = ChatSnapshot(
-        chat=ChatDescriptor(raw_id="1", title="T", has_unread=True),
+        chat=ChatDescriptor(raw_id="1", title="", has_unread=True),
         messages=[Message(sender_type="other", text="how are you")],
     )
     messages = _snapshot_to_messages(snapshot, persona)
@@ -109,3 +109,33 @@ def test_examples_become_fewshot_turns() -> None:
     assert messages[2] == {"role": "assistant", "content": "hey!"}
     assert messages[3] == {"role": "user", "content": "how are you"}
     assert messages[-1]["content"] == "Write my next reply to this conversation."
+
+
+def test_platform_and_account_context_injected() -> None:
+    persona = Personality(name="Alex")
+    snapshot = ChatSnapshot(
+        chat=ChatDescriptor(raw_id="1", title="Bob", has_unread=True),
+        messages=[Message(sender_type="other", text="hi")],
+        platform="Telegram",
+        account_name="Alex K",
+    )
+    messages = _snapshot_to_messages(snapshot, persona)
+
+    # A second system message carries the platform/account/chat context.
+    context = messages[1]
+    assert context["role"] == "system"
+    assert "Telegram" in context["content"]
+    assert "Alex K" in context["content"]
+    assert "Bob" in context["content"]
+
+
+def test_no_context_message_when_absent() -> None:
+    persona = Personality(name="Alex")
+    snapshot = ChatSnapshot(
+        chat=ChatDescriptor(raw_id="1", title="", has_unread=True),
+        messages=[Message(sender_type="other", text="hi")],
+    )
+    messages = _snapshot_to_messages(snapshot, persona)
+    # Only the persona system message; no extra context system message.
+    assert sum(1 for m in messages if m["role"] == "system") == 1
+

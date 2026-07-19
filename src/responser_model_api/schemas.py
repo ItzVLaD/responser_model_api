@@ -30,6 +30,11 @@ class ChatDescriptor(BaseModel):
 class ChatSnapshot(BaseModel):
     chat: ChatDescriptor
     messages: list[Message] = Field(default_factory=list)
+    # Context about where the conversation happens, supplied by the reader.
+    # `platform` is the human-readable platform name (e.g. "Telegram").
+    # `account_name` is my display name / handle on that platform.
+    platform: Optional[str] = None
+    account_name: Optional[str] = None
 
 
 class GenerateReplyRequest(BaseModel):

@@ -14,6 +14,18 @@ def _system_prompt(personality: Personality) -> str:
     return f"{RESPONSE_FORMAT_INSTRUCTIONS}\n\n{personality.to_system_prompt()}"
 
 
+def _context_note(snapshot: ChatSnapshot) -> str | None:
+    """Describe where the conversation happens, if the reader provided it."""
+    parts: list[str] = []
+    if snapshot.platform:
+        parts.append(f"You are chatting on {snapshot.platform}.")
+    if snapshot.account_name:
+        parts.append(f"Your name on this platform is {snapshot.account_name}.")
+    if snapshot.chat.title:
+        parts.append(f"This conversation is with {snapshot.chat.title}.")
+    return " ".join(parts) if parts else None
+
+
 def _snapshot_to_messages(
     snapshot: ChatSnapshot, personality: Personality
 ) -> list[dict[str, str]]:
@@ -21,6 +33,11 @@ def _snapshot_to_messages(
     messages: list[dict[str, str]] = [
         {"role": "system", "content": _system_prompt(personality)}
     ]
+
+    # Platform / account context, so the model knows where it is and who it is.
+    context = _context_note(snapshot)
+    if context:
+        messages.append({"role": "system", "content": context})
 
     # Few-shot examples from the persona, shown as prior user/assistant turns so
     # the model learns the desired style before seeing the real conversation.
