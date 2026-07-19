@@ -4,13 +4,29 @@ from __future__ import annotations
 
 from ollama import Client
 
-from .config import OLLAMA_HOST, SYSTEM_PROMPT
+from .config import OLLAMA_HOST, RESPONSE_FORMAT_INSTRUCTIONS
+from .personality import Personality
 from .schemas import ChatSnapshot, GeneratedReply, GenerationConfig
 
 
-def _snapshot_to_messages(snapshot: ChatSnapshot) -> list[dict[str, str]]:
+def _system_prompt(personality: Personality) -> str:
+    """Combine the fixed format contract with the selected persona."""
+    return f"{RESPONSE_FORMAT_INSTRUCTIONS}\n\n{personality.to_system_prompt()}"
+
+
+def _snapshot_to_messages(
+    snapshot: ChatSnapshot, personality: Personality
+) -> list[dict[str, str]]:
     """Map a ChatSnapshot into an Ollama/OpenAI-style messages array."""
-    messages: list[dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": _system_prompt(personality)}
+    ]
+
+    # Few-shot examples from the persona, shown as prior user/assistant turns so
+    # the model learns the desired style before seeing the real conversation.
+    for example in personality.examples:
+        messages.append({"role": "user", "content": example.incoming})
+        messages.append({"role": "assistant", "content": example.reply})
 
     for msg in snapshot.messages:
         if msg.sender_type == "other":
@@ -26,11 +42,12 @@ def _snapshot_to_messages(snapshot: ChatSnapshot) -> list[dict[str, str]]:
 
 
 class OllamaReplyGenerator:
-    def __init__(self, host: str = OLLAMA_HOST) -> None:
+    def __init__(self, personality: Personality, host: str = OLLAMA_HOST) -> None:
+        self._personality = personality
         self._client = Client(host=host)
 
     def generate(self, snapshot: ChatSnapshot, config: GenerationConfig) -> GeneratedReply:
-        messages = _snapshot_to_messages(snapshot)
+        messages = _snapshot_to_messages(snapshot, self._personality)
         response = self._client.chat(
             model=config.model_name,
             messages=messages,

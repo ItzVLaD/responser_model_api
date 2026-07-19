@@ -15,7 +15,9 @@ def test_health() -> None:
     client = TestClient(app_module.app)
     resp = client.get("/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert "personality" in body
 
 
 def test_generate_reply(monkeypatch) -> None:
