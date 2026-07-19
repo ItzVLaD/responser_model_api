@@ -96,16 +96,17 @@ class Personality(BaseModel):
         if self.background:
             parts.append(f"Background: {self.background}")
 
-        # Voice block: how this person writes.
+        # Voice block: how this person writes. Framed as *tendencies* so the
+        # model adapts them to context instead of applying them mechanically.
         voice: list[str] = []
         if self.tone:
             voice.append(f"Tone: {self.tone}.")
         if self.speech_style:
-            voice.append(f"Speech style: {self.speech_style}.")
+            voice.append(f"Speech style (a tendency, not a fixed rule): {self.speech_style}.")
         if self.language:
             voice.append(f"Write in {self.language}.")
         if self.emoji_usage:
-            voice.append(f"Emoji use: {self.emoji_usage}.")
+            voice.append(f"Emoji use (only when it fits): {self.emoji_usage}.")
         if voice:
             parts.append(" ".join(voice))
 
@@ -123,6 +124,17 @@ class Personality(BaseModel):
         if self.rules:
             rules = "\n".join(f"- {rule}" for rule in self.rules)
             parts.append(f"Follow these rules:\n{rules}")
+
+        # Adaptability note: the persona describes who you are, not a rigid
+        # template. Real people vary message to message depending on context.
+        parts.append(
+            "Adapt naturally to the flow of the conversation. The traits above "
+            "describe your general character, not a strict formula: vary your "
+            "message length, emoji use, and phrasing to fit what is actually "
+            "being said. A short style does not mean every message is short, and "
+            "liking emojis does not mean using them in every message - match the "
+            "moment like a real person would."
+        )
 
         return "\n\n".join(parts)
 

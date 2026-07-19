@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from responser_model_api.config import RESPONSE_FORMAT_INSTRUCTIONS
+from responser_model_api.config import PERSONALITIES_DIR, RESPONSE_FORMAT_INSTRUCTIONS
 from responser_model_api.ollama_client import _snapshot_to_messages, _system_prompt
 from responser_model_api.personality import (
     Personality,
@@ -90,6 +90,23 @@ def test_format_instructions_enforce_human_act() -> None:
     lowered = RESPONSE_FORMAT_INSTRUCTIONS.lower()
     assert "human" in lowered
     assert "never an ai" in lowered or "deny being ai" in lowered
+
+
+def test_system_prompt_has_adaptability_note() -> None:
+    persona = Personality(name="Mia", speech_style="short and punchy")
+    prompt = persona.to_system_prompt()
+    lowered = prompt.lower()
+    # Style is framed as a tendency and the model is told to adapt to context.
+    assert "adapt" in lowered
+    assert "tendency" in lowered
+
+
+def test_bundled_personalities_load() -> None:
+    directory = PERSONALITIES_DIR
+    names = available_personalities(directory)
+    assert {"friendly", "professional", "mia"}.issubset(set(names))
+    for name in names:
+        load_personality(name, directory)  # must parse without error
 
 
 def test_examples_become_fewshot_turns() -> None:
