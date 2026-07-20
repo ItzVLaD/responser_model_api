@@ -116,7 +116,7 @@ def test_bundled_personalities_load() -> None:
         load_personality(name, directory)  # must parse without error
 
 
-def test_examples_become_fewshot_turns() -> None:
+def test_examples_are_illustrations_not_conversation_turns() -> None:
     persona = Personality(
         name="Friendly",
         examples=[{"incoming": "hi", "reply": "hey!"}],
@@ -127,12 +127,19 @@ def test_examples_become_fewshot_turns() -> None:
     )
     messages = _snapshot_to_messages(snapshot, persona)
 
-    # system, then the few-shot pair, then the real message, then the ask.
-    assert messages[0]["role"] == "system"
-    assert messages[1] == {"role": "user", "content": "hi"}
-    assert messages[2] == {"role": "assistant", "content": "hey!"}
-    assert messages[3] == {"role": "user", "content": "how are you"}
-    assert messages[-1]["content"] == "Write my next reply to this conversation."
+    # The example must NOT appear as a real user/assistant turn (that would
+    # pollute the conversation history).
+    non_system = [m for m in messages if m["role"] != "system"]
+    assert {"role": "user", "content": "hi"} not in non_system
+    assert {"role": "assistant", "content": "hey!"} not in non_system
+
+    # The only real conversation content is the incoming message + the ask.
+    assert non_system[0] == {"role": "user", "content": "how are you"}
+    assert non_system[-1]["content"] == "Write my next reply to this conversation."
+
+    # The example lives in the system prompt as an illustration instead.
+    assert 'reply: "hey!"' in messages[0]["content"] or "hey!" in messages[0]["content"]
+    assert "NOT part of the real conversation" in messages[0]["content"]
 
 
 def test_platform_and_account_context_injected() -> None:

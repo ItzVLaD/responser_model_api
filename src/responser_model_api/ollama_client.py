@@ -92,7 +92,20 @@ def _looks_like_refusal(text: str) -> bool:
 
 def _system_prompt(personality: Personality) -> str:
     """Combine the fixed format contract with the selected persona."""
-    return f"{RESPONSE_FORMAT_INSTRUCTIONS}\n\n{personality.to_system_prompt()}"
+    prompt = f"{RESPONSE_FORMAT_INSTRUCTIONS}\n\n{personality.to_system_prompt()}"
+
+    # Include the persona's examples as *illustrations* of style inside the
+    # system prompt, NOT as real conversation turns. Injecting them as
+    # user/assistant messages makes the model treat them as things that were
+    # actually said, polluting the context and producing off-topic replies.
+    if personality.examples:
+        lines = ["Here are examples of how you tend to reply (for style only, "
+                 "these are NOT part of the real conversation):"]
+        for ex in personality.examples:
+            lines.append(f'- If someone says "{ex.incoming}", you might reply: "{ex.reply}"')
+        prompt += "\n\n" + "\n".join(lines)
+
+    return prompt
 
 
 def _context_note(snapshot: ChatSnapshot) -> str | None:
@@ -120,12 +133,9 @@ def _snapshot_to_messages(
     if context:
         messages.append({"role": "system", "content": context})
 
-    # Few-shot examples from the persona, shown as prior user/assistant turns so
-    # the model learns the desired style before seeing the real conversation.
-    for example in personality.examples:
-        messages.append({"role": "user", "content": example.incoming})
-        messages.append({"role": "assistant", "content": example.reply})
-
+    # NOTE: persona examples are folded into the system prompt (see
+    # _system_prompt), not added here as fake user/assistant turns, so the model
+    # never mistakes them for real conversation history.
     for msg in snapshot.messages:
         if msg.sender_type == "other":
             role = "user"
