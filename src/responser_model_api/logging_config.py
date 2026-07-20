@@ -6,7 +6,8 @@ responds (you can crank up the level to see full prompts and raw completions).
 
 Environment variables:
   RESPONSER_LOG_LEVEL    Logging level (DEBUG, INFO, WARNING, ...). Default INFO.
-  RESPONSER_LOG_FILE     Optional path to also write logs to a file.
+  RESPONSER_LOG_FILE     Path of the log file. Defaults to ``logs/model_api.log``.
+                         Set to an empty string to disable file logging.
   RESPONSER_LOG_PROMPTS  If "true", DEBUG logs include the full prompt messages
                          and raw model output. Off by default to avoid writing
                          private chat content to logs.
@@ -16,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
+from pathlib import Path
 
 _LOGGER_NAME = "responser.model_api"
 
@@ -24,6 +25,18 @@ _LOGGER_NAME = "responser.model_api"
 # default: prompts contain private chat content and should not be logged unless
 # explicitly opted in for debugging.
 LOG_PROMPTS = os.environ.get("RESPONSER_LOG_PROMPTS", "false").lower() == "true"
+
+# Default log file, relative to the project root (two levels up from this file).
+# Logs are written here unless RESPONSER_LOG_FILE is set to something else, or to
+# an empty string to disable file logging entirely.
+_DEFAULT_LOG_FILE = str(Path(__file__).resolve().parents[2] / "logs" / "model_api.log")
+
+
+def _resolve_log_file() -> str:
+    """Return the log file path, or "" if file logging is disabled."""
+    # `os.environ.get(..., default)` returns the default only when the var is
+    # unset; an explicit empty string disables file logging.
+    return os.environ.get("RESPONSER_LOG_FILE", _DEFAULT_LOG_FILE)
 
 
 def configure_logging() -> logging.Logger:
@@ -43,9 +56,12 @@ def configure_logging() -> logging.Logger:
     console.setFormatter(formatter)
     logger.addHandler(console)
 
-    log_file: Optional[str] = os.environ.get("RESPONSER_LOG_FILE")
+    # Logs are persisted to a file by default so past runs can be inspected.
+    log_file = _resolve_log_file()
     if log_file:
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        path = Path(log_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(path, encoding="utf-8")
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
 

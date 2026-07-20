@@ -12,6 +12,10 @@ build/
 dist/
 *.egg-info/
 
+# Logs (may contain private chat content when prompt logging is on)
+logs/
+*.log
+
 # Editor / OS
 .DS_Store
 .vscode/

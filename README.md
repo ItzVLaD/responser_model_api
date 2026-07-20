@@ -81,7 +81,7 @@ edit can shape tone but cannot break the reply contract or the human-acting rule
 | `RESPONSER_PERSONALITY`      | `friendly`               | Which `personalities/<name>.yaml` to use |
 | `RESPONSER_PERSONALITIES_DIR`| `./personalities`        | Folder holding personality YAML files    |
 | `RESPONSER_LOG_LEVEL`        | `INFO`                   | Log level (DEBUG, INFO, WARNING, ...)     |
-| `RESPONSER_LOG_FILE`         | *(unset)*                | Also write logs to this file              |
+| `RESPONSER_LOG_FILE`         | `logs/model_api.log`     | Log file path (empty string disables it)  |
 | `RESPONSER_LOG_PROMPTS`      | `false`                  | DEBUG-log full prompts + raw output       |
 
 > Model inference parameters (model, temperature, top-p, max tokens) are an
@@ -99,6 +99,9 @@ RESPONSER_LOG_LEVEL=DEBUG RESPONSER_LOG_PROMPTS=true \
   uvicorn responser_model_api.app:app --port 8000
 ```
 
+- Logs are also **written to a file by default** (`logs/model_api.log`). Change the
+  path with `RESPONSER_LOG_FILE`, or set it to an empty string to disable file
+  logging.
 - **INFO** logs each request (persona, platform, chat, message count, model,
   temperature), the generation time, token counts, and the final reply. Refusal
   detection and fallbacks are logged as **WARNING**.
