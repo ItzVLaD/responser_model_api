@@ -39,6 +39,38 @@ _REFUSAL_MARKERS: tuple[str, ...] = (
 # Deliberately vague so it fits most personas without generating any real content.
 _DEFLECTION_FALLBACK = "haha nah, let's not go there. anyway, what else is up?"
 
+# Chat-template role labels. Some models keep generating past their reply and
+# emit the header of the next turn (e.g. a trailing "system"/"user"/"assistant"),
+# which leaks into the visible text. We strip these from the tail of the output.
+_ROLE_LABELS = ("system", "user", "assistant")
+
+
+def _clean_completion(text: str) -> str:
+    """Remove chat-template artifacts (stray role labels / tokens) from output."""
+    cleaned = text.strip()
+
+    # Drop any trailing lines that are just a role label, possibly wrapped in
+    # template markup like "<|system|>" or "system:".
+    changed = True
+    while changed and cleaned:
+        changed = False
+        lines = cleaned.splitlines()
+        last = lines[-1].strip().strip("<>|").rstrip(":").strip()
+        if last.lower() in _ROLE_LABELS:
+            cleaned = "\n".join(lines[:-1]).strip()
+            changed = True
+
+    # Also handle a role label glued onto the end of the final line, e.g.
+    # "...what else is up?system".
+    for label in _ROLE_LABELS:
+        if cleaned.lower().endswith(label) and len(cleaned) > len(label):
+            preceding = cleaned[: -len(label)]
+            # Only strip when it is not a real word ending (a boundary char before).
+            if preceding[-1] in " \n\t.,!?)»\"'":
+                cleaned = preceding.rstrip()
+
+    return cleaned.strip()
+
 
 def _looks_like_refusal(text: str) -> bool:
     lowered = text.lower()
@@ -121,7 +153,7 @@ class OllamaReplyGenerator:
 
         started = time.monotonic()
         response = self._chat(messages)
-        text = response["message"]["content"].strip()
+        text = _clean_completion(response["message"]["content"])
         if LOG_PROMPTS:
             log.debug("raw completion: %r", text)
 
@@ -143,7 +175,7 @@ class OllamaReplyGenerator:
                 }
             ]
             response = self._chat(nudge)
-            retry_text = response["message"]["content"].strip()
+            retry_text = _clean_completion(response["message"]["content"])
             if _looks_like_refusal(retry_text):
                 log.warning("retry still refused; using deflection fallback")
                 text = _DEFLECTION_FALLBACK
