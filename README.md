@@ -25,6 +25,50 @@ uvicorn responser_model_api.app:app --reload --port 8000
 - Generate reply: `POST http://localhost:8000/generate_reply`
 - Contract / docs: `http://localhost:8000/docs` and `http://localhost:8000/openapi.json`
 
+## Choosing a model
+
+The model is selected via `RESPONSER_MODEL` (see the config table). The default,
+`llama3.2:3b`, is fast on CPU but its built-in safety training makes it refuse
+"taboo" topics with robotic, out-of-character boilerplate. For personas that need
+freer conversation, an uncensored model works far better.
+
+Top 5 models to consider (tuned for a CPU-only, 16 GB machine):
+
+| Model | Size | Speed (CPU) | Refusals | Notes |
+|-------|------|-------------|----------|-------|
+| `dolphin-mistral` | 7B | medium | very low | Best overall balance; strong instruction-following. |
+| `dolphin3` (Llama 3.1) | 8B | slow | very low | Highest quality / most natural; slowest here. |
+| llama3.2 **abliterated** 3B | 3B | fast | low | Same speed as default; refusals removed (check hub for exact tag). |
+| `nous-hermes2` (Mistral) | 7B | medium | low | Most personable / roleplay-friendly tone. |
+| `gemma2:2b` | 2B | fast | high (aligned) | Fast, but still censored — does *not* fix refusals. |
+
+Recommendation: start with the **3B abliterated** model (no speed penalty, fixes
+most refusals); step up to **`dolphin-mistral`** if you want better quality.
+
+> First request after loading a new model is slow (it loads into RAM); on 16 GB,
+> run only one 7–8B model at a time. Only adult, legal content is in scope.
+
+### Check which models you have pulled
+
+```bash
+ollama list
+```
+
+This lists every model available locally (name, size, and modified date). Use it
+to confirm a `RESPONSER_MODEL` value exists before starting the API.
+
+### Pull and switch
+
+```bash
+ollama pull dolphin-mistral            # download once (a few GB)
+ollama list                            # confirm it is available
+
+# switch by pointing RESPONSER_MODEL at it (no code change needed)
+RESPONSER_MODEL=dolphin-mistral uvicorn responser_model_api.app:app --port 8000
+
+ollama rm llama3.2:3b                  # optional: remove a model you no longer need
+```
+
 ## Personalities
 
 A *personality* describes how the model should behave (identity, background, tone,
