@@ -116,7 +116,14 @@ def _context_note(snapshot: ChatSnapshot) -> str | None:
     if snapshot.account_name:
         parts.append(f"Your name on this platform is {snapshot.account_name}.")
     if snapshot.chat.title:
-        parts.append(f"This conversation is with {snapshot.chat.title}.")
+        # Make clear the title is the person being ADDRESSED (second person),
+        # not a third party to talk about. Otherwise the model asks the other
+        # person to "tell me about <their own name>".
+        parts.append(
+            f"You are talking directly to {snapshot.chat.title}; that is the "
+            "person you are replying to, so address them as 'you', never refer "
+            "to them in the third person."
+        )
     return " ".join(parts) if parts else None
 
 

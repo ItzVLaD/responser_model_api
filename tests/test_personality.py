@@ -158,6 +158,10 @@ def test_platform_and_account_context_injected() -> None:
     assert "Telegram" in context["content"]
     assert "Alex K" in context["content"]
     assert "Bob" in context["content"]
+    # The other person must be framed as being addressed directly ("you"),
+    # not as a third party to talk about.
+    assert "talking directly to Bob" in context["content"]
+    assert "third person" in context["content"]
 
 
 def test_no_context_message_when_absent() -> None:
