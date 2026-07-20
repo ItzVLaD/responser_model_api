@@ -9,7 +9,7 @@ from pathlib import Path
 from .personality import Personality, load_personality
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-DEFAULT_MODEL = os.environ.get("RESPONSER_MODEL", "llama3.2:3b")
+DEFAULT_MODEL = os.environ.get("RESPONSER_MODEL", "nous-hermes2:latest")
 
 # Fixed output-contract instructions. These live in code (not the personality
 # file) so a persona edit can never break the reply format the web reader relies
