@@ -69,7 +69,20 @@ def _clean_completion(text: str) -> str:
             if preceding[-1] in " \n\t.,!?)»\"'":
                 cleaned = preceding.rstrip()
 
+    cleaned = _collapse_duplicate_halves(cleaned)
     return cleaned.strip()
+
+
+def _collapse_duplicate_halves(text: str) -> str:
+    """Collapse output where the model repeated its whole reply twice.
+
+    Small models sometimes emit the same message twice, separated by a blank
+    line. If the two halves are (nearly) identical, keep only the first.
+    """
+    parts = [p.strip() for p in text.split("\n\n") if p.strip()]
+    if len(parts) == 2 and parts[0] == parts[1]:
+        return parts[0]
+    return text
 
 
 def _looks_like_refusal(text: str) -> bool:

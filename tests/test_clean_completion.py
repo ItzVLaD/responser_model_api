@@ -30,3 +30,13 @@ def test_does_not_touch_real_words() -> None:
 
 def test_leaves_clean_text_unchanged() -> None:
     assert _clean_completion("haha nah, what else is up?") == "haha nah, what else is up?"
+
+
+def test_collapses_duplicated_reply() -> None:
+    doubled = "sorry, my bad! let's move on 🙈\n\nsorry, my bad! let's move on 🙈"
+    assert _clean_completion(doubled) == "sorry, my bad! let's move on 🙈"
+
+
+def test_does_not_collapse_distinct_paragraphs() -> None:
+    text = "first thought here\n\na totally different second thought"
+    assert _clean_completion(text) == text

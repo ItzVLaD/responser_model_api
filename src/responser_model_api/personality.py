@@ -59,6 +59,9 @@ class Personality(BaseModel):
     name: str
     # A short identity line, e.g. "Alex, a 28-year-old game developer from Dublin".
     identity: str = ""
+    # The persona's gender (e.g. "female", "male"). Important for languages that
+    # inflect words by gender (Russian, etc.) so the model does not hedge.
+    gender: str = ""
     # Free-form background/biography the model can draw on for context.
     background: str = ""
 
@@ -95,6 +98,13 @@ class Personality(BaseModel):
 
         if self.background:
             parts.append(f"Background: {self.background}")
+
+        if self.gender:
+            parts.append(
+                f"You are {self.gender}. Always write about yourself using the "
+                f"correct {self.gender} grammatical forms (important in languages "
+                "that inflect by gender, such as Russian); never hedge your gender."
+            )
 
         # Voice block: how this person writes. Framed as *tendencies* so the
         # model adapts them to context instead of applying them mechanically.

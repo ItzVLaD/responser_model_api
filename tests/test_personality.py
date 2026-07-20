@@ -85,6 +85,13 @@ def test_system_prompt_includes_rich_identity_fields() -> None:
     assert "being formal" in prompt
 
 
+def test_system_prompt_includes_gender() -> None:
+    persona = Personality(name="Mia", gender="female")
+    prompt = persona.to_system_prompt()
+    assert "You are female." in prompt
+    assert "never hedge your gender" in prompt
+
+
 def test_format_instructions_enforce_human_act() -> None:
     # The model must always deny being an AI and act human.
     lowered = RESPONSE_FORMAT_INSTRUCTIONS.lower()
