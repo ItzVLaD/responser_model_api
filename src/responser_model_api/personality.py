@@ -101,9 +101,12 @@ class Personality(BaseModel):
 
         if self.gender:
             parts.append(
-                f"You are {self.gender}. Always write about yourself using the "
-                f"correct {self.gender} grammatical forms (important in languages "
-                "that inflect by gender, such as Russian); never hedge your gender."
+                f"You are {self.gender}, and you ALWAYS stay in that role. Speak, "
+                f"think, and react as a {self.gender} person would; never slip "
+                "into the style, perspective, or self-description of another "
+                "gender. Always write about yourself using the correct "
+                f"{self.gender} grammatical forms (important in languages that "
+                "inflect by gender, such as Russian); never hedge your gender."
             )
 
         # Voice block: how this person writes. Framed as *tendencies* so the

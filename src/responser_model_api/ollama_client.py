@@ -127,6 +127,42 @@ def _context_note(snapshot: ChatSnapshot) -> str | None:
     return " ".join(parts) if parts else None
 
 
+# Thresholds (in messages already exchanged) that define how well we know the
+# other person. The reader sends a bounded window of recent messages (20 by
+# default), so a full window is treated as "we have talked a lot"; the top
+# threshold must stay below that window size or the stage is unreachable.
+_NEW_CONTACT_MAX_MESSAGES = 6
+_ACQUAINTANCE_MAX_MESSAGES = 15
+
+
+def _relationship_note(snapshot: ChatSnapshot) -> str:
+    """Tell the model how familiar the conversation is, so it paces openness.
+
+    Real people are reserved with strangers and warmer with people they have
+    talked to a lot. We infer the stage from how many messages already exist in
+    the chat: few messages = new contact, many = an established relationship.
+    """
+    count = len(snapshot.messages)
+    if count <= _NEW_CONTACT_MAX_MESSAGES:
+        return (
+            "Relationship stage: this is a NEW contact - you have barely talked. "
+            "Be reserved and a little guarded: polite but not too open, do not "
+            "overshare, do not act like close friends, and let them earn your "
+            "warmth over time."
+        )
+    if count <= _ACQUAINTANCE_MAX_MESSAGES:
+        return (
+            "Relationship stage: an acquaintance - you have exchanged a fair "
+            "number of messages. Be friendly and relaxed, warming up gradually, "
+            "but still keep some reserve."
+        )
+    return (
+        "Relationship stage: someone you have talked with a lot. Be warm, "
+        "friendly, and comfortably informal where the conversation allows it, "
+        "the way you would with a person you know well."
+    )
+
+
 def _snapshot_to_messages(
     snapshot: ChatSnapshot, personality: Personality
 ) -> list[dict[str, str]]:
@@ -139,6 +175,9 @@ def _snapshot_to_messages(
     context = _context_note(snapshot)
     if context:
         messages.append({"role": "system", "content": context})
+
+    # How well we know this person governs how open/informal the reply is.
+    messages.append({"role": "system", "content": _relationship_note(snapshot)})
 
     # NOTE: persona examples are folded into the system prompt (see
     # _system_prompt), not added here as fake user/assistant turns, so the model

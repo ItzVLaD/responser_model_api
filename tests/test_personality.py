@@ -88,8 +88,21 @@ def test_system_prompt_includes_rich_identity_fields() -> None:
 def test_system_prompt_includes_gender() -> None:
     persona = Personality(name="Mia", gender="female")
     prompt = persona.to_system_prompt()
-    assert "You are female." in prompt
+    assert "You are female" in prompt
     assert "never hedge your gender" in prompt
+    # The agent must stay in its gender role, not just use the right grammar.
+    assert "ALWAYS stay in that role" in prompt
+    assert "react as a female person would" in prompt
+    assert "another gender" in prompt
+
+
+def test_format_instructions_mirror_message_length() -> None:
+    lowered = RESPONSE_FORMAT_INSTRUCTIONS.lower()
+    assert "mirror the other person's message length" in lowered
+    # Short in -> short out, with an explicit exception for content that
+    # genuinely needs detail (e.g. being asked about hobbies).
+    assert "reply short" in lowered
+    assert "hobbies" in lowered
 
 
 def test_format_instructions_enforce_human_act() -> None:
@@ -171,6 +184,52 @@ def test_no_context_message_when_absent() -> None:
         messages=[Message(sender_type="other", text="hi")],
     )
     messages = _snapshot_to_messages(snapshot, persona)
-    # Only the persona system message; no extra context system message.
-    assert sum(1 for m in messages if m["role"] == "system") == 1
+    # Persona + relationship-stage system messages only; no platform context.
+    system = [m["content"] for m in messages if m["role"] == "system"]
+    assert len(system) == 2
+    assert not any("chatting on" in s for s in system)
+
+
+def _snapshot_with_n_messages(n: int) -> ChatSnapshot:
+    msgs = [
+        Message(sender_type="other" if i % 2 == 0 else "me", text=f"m{i}")
+        for i in range(n)
+    ]
+    return ChatSnapshot(
+        chat=ChatDescriptor(raw_id="1", title="Bob", has_unread=True),
+        messages=msgs,
+    )
+
+
+def _relationship_system_note(snapshot: ChatSnapshot) -> str:
+    messages = _snapshot_to_messages(snapshot, Personality(name="Mia"))
+    notes = [
+        m["content"]
+        for m in messages
+        if m["role"] == "system" and "Relationship stage" in m["content"]
+    ]
+    assert len(notes) == 1
+    return notes[0]
+
+
+def test_new_contact_is_reserved() -> None:
+    note = _relationship_system_note(_snapshot_with_n_messages(2))
+    assert "NEW contact" in note
+    assert "reserved" in note
+    assert "not too open" in note
+
+
+def test_acquaintance_warms_up_but_keeps_reserve() -> None:
+    note = _relationship_system_note(_snapshot_with_n_messages(10))
+    assert "acquaintance" in note
+    assert "still keep some reserve" in note
+
+
+def test_long_relationship_is_friendly_and_informal() -> None:
+    # A full reader window (20 messages) must count as "talked a lot".
+    note = _relationship_system_note(_snapshot_with_n_messages(20))
+    assert "talked with a lot" in note
+    assert "informal" in note
+    # Informality is conditional on the situation, not unconditional.
+    assert "where the conversation allows" in note
 
