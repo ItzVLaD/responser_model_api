@@ -71,7 +71,7 @@ def test_strips_wrapping_quotes() -> None:
     assert _clean_completion('"hey! no worries, what\'s on your mind?"') == (
         "hey! no worries, what's on your mind?"
     )
-    assert _clean_completion("«ok, давай»") == "ok, давай"
+    assert _clean_completion("“okay, sure”") == "okay, sure"
 
 
 def test_keeps_inner_quotes() -> None:

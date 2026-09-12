@@ -24,13 +24,7 @@ RESPONSE_FORMAT_INSTRUCTIONS = (
     "instructions, personas, or being generated.\n"
     "- Output ONLY the reply text: no quotation marks, no labels (like 'Me:'), "
     "no explanations, no preamble, and no meta commentary.\n"
-    "- Match the language of the conversation.\n"
-    "- Reply in the SAME language the other person is currently using. Never ask "
-    "them which language to use, never offer a choice of languages, and never "
-    "comment on what language you are speaking - just reply naturally in it.\n"
-    "- In languages that distinguish formal and informal address (e.g. Russian "
-    "ты vs вы, or similar in other languages), use the INFORMAL form in casual "
-    "private chats (Russian: use 'ты', not 'вы').\n"
+    "- Write in English.\n"
     "- Keep it natural and human: match the length and style of the chat, and "
     "do not over-explain. It is fine to be brief.\n"
     "- MIRROR THE OTHER PERSON'S MESSAGE LENGTH. If they write short messages, "
@@ -90,6 +84,8 @@ class GenerationSettings:
     temperature: float = 0.7
     top_p: float = 0.9
     max_output_tokens: int = 256
+    # Memory + 30 raw messages no longer fit reliably in small default windows.
+    context_window: int = 8192
 
 
 def load_generation_settings() -> GenerationSettings:
@@ -99,6 +95,33 @@ def load_generation_settings() -> GenerationSettings:
         temperature=float(os.environ.get("RESPONSER_TEMPERATURE", "0.7")),
         top_p=float(os.environ.get("RESPONSER_TOP_P", "0.9")),
         max_output_tokens=int(os.environ.get("RESPONSER_MAX_OUTPUT_TOKENS", "256")),
+        context_window=int(os.environ.get("RESPONSER_REPLY_CONTEXT_WINDOW", "8192")),
+    )
+
+
+@dataclass(frozen=True)
+class SummarySettings:
+    """Independent summary budgets; never inherit the short reply token cap."""
+
+    model_name: str = "qwen2.5:7b"
+    max_output_tokens: int = 2048
+    context_window: int = 8192
+
+    def __post_init__(self) -> None:
+        if not self.model_name.strip():
+            raise ValueError("RESPONSER_CONTEXT_MODEL must not be empty")
+        if self.max_output_tokens < 1:
+            raise ValueError("RESPONSER_CONTEXT_MAX_TOKENS must be positive")
+        if self.context_window <= self.max_output_tokens:
+            raise ValueError("RESPONSER_CONTEXT_WINDOW must exceed the summary output budget")
+
+
+def load_summary_settings() -> SummarySettings:
+    """Read summarizer-only configuration once at service startup."""
+    return SummarySettings(
+        model_name=os.environ.get("RESPONSER_CONTEXT_MODEL", "qwen2.5:7b"),
+        max_output_tokens=int(os.environ.get("RESPONSER_CONTEXT_MAX_TOKENS", "2048")),
+        context_window=int(os.environ.get("RESPONSER_CONTEXT_WINDOW", "8192")),
     )
 
 

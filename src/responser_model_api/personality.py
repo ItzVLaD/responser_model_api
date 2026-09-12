@@ -59,8 +59,7 @@ class Personality(BaseModel):
     name: str
     # A short identity line, e.g. "Alex, a 28-year-old game developer from Dublin".
     identity: str = ""
-    # The persona's gender (e.g. "female", "male"). Important for languages that
-    # inflect words by gender (Russian, etc.) so the model does not hedge.
+    # The persona's gender (e.g. "female", "male") keeps self-description consistent.
     gender: str = ""
     # Free-form background/biography the model can draw on for context.
     background: str = ""
@@ -70,7 +69,7 @@ class Personality(BaseModel):
     # Concrete description of speech style: sentence length, punctuation habits,
     # capitalization, slang, formality, etc.
     speech_style: str = ""
-    # Language(s) the persona writes in (e.g. "English", "casual Irish English").
+    # English voice or dialect (e.g. "English", "casual Irish English").
     language: str = ""
     # How the persona uses emojis (e.g. "rarely", "loves 😂 and 🔥").
     emoji_usage: str = ""
@@ -104,9 +103,7 @@ class Personality(BaseModel):
                 f"You are {self.gender}, and you ALWAYS stay in that role. Speak, "
                 f"think, and react as a {self.gender} person would; never slip "
                 "into the style, perspective, or self-description of another "
-                "gender. Always write about yourself using the correct "
-                f"{self.gender} grammatical forms (important in languages that "
-                "inflect by gender, such as Russian); never hedge your gender."
+                "gender. Keep your self-description consistent; never hedge your gender."
             )
 
         # Voice block: how this person writes. Framed as *tendencies* so the

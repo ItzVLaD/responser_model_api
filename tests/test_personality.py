@@ -272,7 +272,7 @@ def test_length_budget_mirrors_short_messages_with_token_cap() -> None:
         _snapshot(("other", "hey"), ("me", "hi there"), ("other", "bruh"), ("other", "boring"))
     )
     # ~1 word each -> the floor of 6 words, backed by a tight generation cap
-    # (Latin text: 2 tokens/word + margin).
+    # (English text: 2 tokens/word + margin).
     assert "about 1 words each" in budget.note
     assert "at most about 6 words" in budget.note
     assert budget.max_tokens == 6 * 2 + 16
@@ -285,11 +285,9 @@ def test_length_budget_scales_with_longer_messages() -> None:
     assert budget.max_tokens == 30 * 2 + 16
 
 
-def test_length_budget_uses_bigger_token_estimate_for_cyrillic() -> None:
-    budget = _length_budget(_snapshot(("other", "привет"), ("other", "как сам")))
-    # Russian words tokenize into several tokens each; the ceiling must not
-    # cut a 6-word reply in half.
-    assert budget.max_tokens == 6 * 4 + 16
+def test_length_budget_uses_fixed_english_token_estimate() -> None:
+    budget = _length_budget(_snapshot(("other", "hello"), ("other", "you okay")))
+    assert budget.max_tokens == 6 * 2 + 16
 
 
 def test_length_budget_never_exceeds_mirror_ceiling() -> None:
@@ -304,8 +302,8 @@ def test_length_budget_never_exceeds_mirror_ceiling() -> None:
         "tell me about your hobbies",
         "what do you like doing on weekends",
         "how was your day?",
-        "расскажи о себе",
-        "чем ты увлекаешься",
+        "describe yourself",
+        "what are your interests",
     ],
 )
 def test_length_budget_opens_up_when_asked_to_elaborate(incoming: str) -> None:
