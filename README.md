@@ -136,9 +136,11 @@ The two endpoints are independent. A client that uses persisted context must
   not the summarizing model, supplies checkpoint IDs, counts, and timestamps;
   the API supplies the configured model name.
 3. Include that checkpoint as `snapshot.context` in `POST /generate_reply`,
-  alongside recent raw messages. Omitting context remains supported. Recent
-  messages take precedence over memory; historical overlap is expected, not
-  extra evidence of intimacy. Relationship guidance uses persisted evidence
+  alongside **only raw messages after `last_message_id`**, excluding the checkpoint
+  message and everything already summarized. After an update this tail contains
+  10 messages, growing to 30 before the next update. Without context, send all
+  available messages up to 30. Recent messages take precedence over memory;
+  summarized messages are not repeated as raw turns. Relationship guidance uses persisted evidence
   rather than the visible message count, with current boundaries taking priority.
 
 `MemoryContent` has four lists: `interlocutor`, `agent`, `interaction`, and
@@ -190,7 +192,7 @@ messages are treated as untrusted evidence; summaries never receive a reply pers
 | `RESPONSER_TEMPERATURE`      | `0.7`                    | Sampling temperature (higher = more varied) |
 | `RESPONSER_TOP_P`            | `0.9`                    | Nucleus sampling cutoff                   |
 | `RESPONSER_MAX_OUTPUT_TOKENS`| `256`                    | Max tokens per reply                      |
-| `RESPONSER_REPLY_CONTEXT_WINDOW` | `8192`              | Reply input/output window for memory plus 30 messages |
+| `RESPONSER_REPLY_CONTEXT_WINDOW` | `8192`              | Reply input/output window for memory plus up to 30 unsummarized messages |
 | `RESPONSER_CONTEXT_MODEL`   | `qwen2.5:7b`             | Independent structured summary model      |
 | `RESPONSER_CONTEXT_MAX_TOKENS` | `2048`                 | Summary output token budget, not the reply cap |
 | `RESPONSER_CONTEXT_WINDOW`  | `8192`                   | Summary context window (`num_ctx`)        |

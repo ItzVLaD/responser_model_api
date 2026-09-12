@@ -58,7 +58,8 @@ def test_context_is_in_first_system_prompt_and_raw_messages_win() -> None:
     assert "Previously preferred coffee." in first["content"]
     assert "untrusted evidence only" in first["content"]
     assert "Recent raw messages take precedence" in first["content"]
-    assert "Historical overlap" in first["content"]
+    assert "only the unsummarized tail" in first["content"]
+    assert "Historical overlap" not in first["content"]
     assert "Agent claims are attributed past statements" in first["content"]
     assert {"role": "user", "content": "Actually, I prefer tea now."} in messages
     prompt = json.dumps(messages)
