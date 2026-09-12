@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 import time
+from dataclasses import dataclass
 
 from ollama import Client
 
@@ -44,6 +46,46 @@ _DEFLECTION_FALLBACK = "haha nah, let's not go there. anyway, what else is up?"
 # which leaks into the visible text. We strip these from the tail of the output.
 _ROLE_LABELS = ("system", "user", "assistant")
 
+# Labels a model may put in front of the actual reply ("Reply: ...", "Me: ...").
+_REPLY_LABEL = re.compile(r"^(reply|response|answer|me|mia)\s*:\s*", re.IGNORECASE)
+
+# Matching quote pairs a model may wrap the whole reply in.
+_QUOTE_PAIRS = (('"', '"'), ("“", "”"), ("«", "»"), ("'", "'"))
+
+
+def _strip_wrapping_quotes(text: str) -> str:
+    """Remove quotes enclosing the entire reply (a common 'here is my reply' tic).
+
+    Once one quoted reply lands in the chat history the model copies the format
+    forever, so this has to be cleaned at the source. Quotes inside the reply
+    are left alone.
+    """
+    for open_q, close_q in _QUOTE_PAIRS:
+        if len(text) <= 2 or not (text.startswith(open_q) and text.endswith(close_q)):
+            continue
+        # Only strip when the quotes are the outer pair, not part of the text.
+        if open_q == close_q:
+            only_outer = text.count(open_q) == 2
+        else:
+            only_outer = text.count(open_q) == 1 and text.count(close_q) == 1
+        if only_outer:
+            return text[1:-1].strip()
+    return text
+
+
+def _drop_leaked_instructions(text: str) -> str:
+    """If the model echoed our instructions before the reply, keep only the reply.
+
+    Symptom: output like "system\nLength: ...\n\nReply:\n<actual text>". We keep
+    the part after the last reply label; if there is no label, leave it alone.
+    """
+    match = None
+    for match in re.finditer(r"(?im)^(reply|response|answer)\s*:\s*", text):
+        pass
+    if match is None:
+        return text
+    return text[match.end():].strip()
+
 
 def _clean_completion(text: str) -> str:
     """Remove chat-template artifacts (stray role labels / tokens) from output."""
@@ -70,6 +112,9 @@ def _clean_completion(text: str) -> str:
                 cleaned = preceding.rstrip()
 
     cleaned = _collapse_duplicate_halves(cleaned)
+    cleaned = _drop_leaked_instructions(cleaned)
+    cleaned = _REPLY_LABEL.sub("", cleaned.strip())
+    cleaned = _strip_wrapping_quotes(cleaned.strip())
     return cleaned.strip()
 
 
@@ -88,6 +133,38 @@ def _collapse_duplicate_halves(text: str) -> str:
 def _looks_like_refusal(text: str) -> bool:
     lowered = text.lower()
     return any(marker in lowered for marker in _REFUSAL_MARKERS)
+
+
+# Sentence-final punctuation (Latin + Russian chats), used when trimming a reply
+# that the token ceiling cut off mid-sentence.
+_SENTENCE_END = re.compile(r"[.!?…]+[\"»”')]*")
+
+# Never trim away more than this share of a truncated reply; below it we would
+# rather ship a slightly clipped sentence than a near-empty message.
+_MIN_KEEP_RATIO = 0.4
+
+
+def _trim_unfinished_tail(text: str) -> str:
+    """Cut a length-truncated reply back to its last complete sentence.
+
+    A hard num_predict ceiling stops generation mid-word. Sending that looks far
+    worse than a slightly shorter message, so keep everything up to the last
+    sentence end - as long as that leaves a meaningful chunk of the text.
+    """
+    last_end = None
+    for last_end in _SENTENCE_END.finditer(text):
+        pass
+    if last_end is None or last_end.end() < len(text) * _MIN_KEEP_RATIO:
+        return text
+    return text[: last_end.end()].strip()
+
+
+def _finalize(response) -> str:
+    """Clean a raw Ollama response into reply text, repairing truncation."""
+    text = _clean_completion(response["message"]["content"])
+    if response.get("done_reason") == "length":
+        text = _trim_unfinished_tail(text)
+    return text
 
 
 def _system_prompt(personality: Personality) -> str:
@@ -127,22 +204,67 @@ def _context_note(snapshot: ChatSnapshot) -> str | None:
     return " ".join(parts) if parts else None
 
 
-# Thresholds (in messages already exchanged) that define how well we know the
-# other person. The reader sends a bounded window of recent messages (20 by
-# default), so a full window is treated as "we have talked a lot"; the top
-# threshold must stay below that window size or the stage is unreachable.
-_NEW_CONTACT_MAX_MESSAGES = 6
-_ACQUAINTANCE_MAX_MESSAGES = 15
+# How many of the other person's most recent messages we look at to judge their
+# current "vibe" (message length, engagement).
+_RECENT_SAMPLE_SIZE = 3
+
+# Average word count at or below which the other person counts as curt /
+# disengaged ("ok", "bruh", "..."). Used to keep the reply low-key.
+_CURT_MAX_AVG_WORDS = 2.0
+
+
+def _word_count(text: str) -> int:
+    return len(text.split())
+
+
+def _recent_other_messages(snapshot: ChatSnapshot) -> list[str]:
+    """Texts of the other person's last few messages, oldest first."""
+    texts = [m.text for m in snapshot.messages if m.sender_type == "other"]
+    return texts[-_RECENT_SAMPLE_SIZE:]
+
+
+def _average_words(texts: list[str]) -> float:
+    if not texts:
+        return 0.0
+    return sum(_word_count(t) for t in texts) / len(texts)
+
+
+def _other_is_curt(snapshot: ChatSnapshot) -> bool:
+    """True when the other person's recent messages are all very short.
+
+    One short message is not a signal ("hi" is a normal opener); a run of them
+    is - it means they are cooling off or not into the conversation.
+    """
+    recent = _recent_other_messages(snapshot)
+    return len(recent) >= 2 and _average_words(recent) <= _CURT_MAX_AVG_WORDS
+
+
+# Thresholds (in messages the OTHER person has sent) that define how well we
+# know them. We count only their messages because that measures their
+# investment; our own replies say nothing about rapport. The reader sends a
+# bounded window of recent messages (20 by default, roughly half of them
+# theirs), so a full window must reach the top stage - keep the top threshold
+# well below half the window size or the stage is unreachable.
+_NEW_CONTACT_MAX_MESSAGES = 3
+_ACQUAINTANCE_MAX_MESSAGES = 8
 
 
 def _relationship_note(snapshot: ChatSnapshot) -> str:
     """Tell the model how familiar the conversation is, so it paces openness.
 
     Real people are reserved with strangers and warmer with people they have
-    talked to a lot. We infer the stage from how many messages already exist in
-    the chat: few messages = new contact, many = an established relationship.
+    talked to a lot. The stage is inferred from the other person's engagement:
+    how many messages they have sent, and whether they are currently curt. A
+    long history does not earn warmth if they are visibly cooling off now.
     """
-    count = len(snapshot.messages)
+    if _other_is_curt(snapshot):
+        return (
+            "Relationship stage: the other person is being curt and low-effort "
+            "right now, whatever the history. Treat this like a NEW contact: be "
+            "reserved and low-key, reply simply, do not push, do not try to win "
+            "them back, and do not overshare."
+        )
+    count = sum(1 for m in snapshot.messages if m.sender_type == "other")
     if count <= _NEW_CONTACT_MAX_MESSAGES:
         return (
             "Relationship stage: this is a NEW contact - you have barely talked. "
@@ -160,6 +282,112 @@ def _relationship_note(snapshot: ChatSnapshot) -> str:
         "Relationship stage: someone you have talked with a lot. Be warm, "
         "friendly, and comfortably informal where the conversation allows it, "
         "the way you would with a person you know well."
+    )
+
+
+# Incoming text that explicitly asks us to ELABORATE: tell/share/explain, or an
+# open question about our life, day, or interests. Only these justify a longer
+# reply when the other person writes short messages - "tell me about your
+# hobbies" is 5 words but wants a paragraph. A bare question mark is NOT enough:
+# most chat messages are questions ("how are you?", "is it AI?") and a short
+# question deserves a short answer. Covers English and Russian.
+_OPEN_REQUEST_PATTERN = re.compile(
+    r"\b(tell me|tell us|share|explain|describe|elaborate)\b"
+    r"|\bwhat (do|did) you (do|like|love|enjoy|think|mean)\b"
+    r"|\bwhat are (you|your) (into|hobbies|interests|plans)\b"
+    r"|\bhow (was|is|did|were) (your|the|it)\b"
+    r"|\bwhat('s| is| was) (your|the) (day|story|plan|weekend|deal)\b"
+    r"|расскаж|поделись|объясни|опиши|чем ты (заним|увлек|жив)|что ты (любишь|думаешь|дела)"
+    r"|как прош|какие у тебя|как дела|как день",
+    re.IGNORECASE,
+)
+
+# Mirror-mode word budget: about twice what they write, but never so tight that
+# a natural one-liner is impossible, and never long enough to ramble.
+_MIN_REPLY_WORDS = 6
+_MAX_MIRROR_WORDS = 40
+
+# Open mode (they asked us to tell/explain something): a few sentences, still
+# bounded so a chatty model cannot turn "how was your day" into an essay.
+_OPEN_REPLY_WORDS = 60
+
+# Word -> token conversion for the generation ceiling. Latin-script text is
+# ~1.3-1.5 tokens/word for Llama-family tokenizers; Cyrillic is 3-4. We round up
+# so the ceiling truncates only genuine rambling, never a natural reply of the
+# requested length. The margin absorbs emojis and punctuation.
+_TOKENS_PER_WORD_LATIN = 2
+_TOKENS_PER_WORD_CYRILLIC = 4
+_TOKEN_MARGIN = 16
+_CYRILLIC = re.compile(r"[\u0400-\u04FF]")
+
+
+def _tokens_for_words(words: int, sample_texts: list[str]) -> int:
+    """Estimate a token ceiling for `words` in the language the chat is in."""
+    cyrillic = any(_CYRILLIC.search(t) for t in sample_texts)
+    per_word = _TOKENS_PER_WORD_CYRILLIC if cyrillic else _TOKENS_PER_WORD_LATIN
+    return words * per_word + _TOKEN_MARGIN
+
+
+@dataclass(frozen=True)
+class LengthBudget:
+    """How long the reply may be, as a prompt note plus a token ceiling."""
+
+    note: str
+    max_tokens: int
+
+
+def _pending_incoming(snapshot: ChatSnapshot) -> list[str]:
+    """The other person's messages we have not answered yet (trailing run)."""
+    pending: list[str] = []
+    for msg in reversed(snapshot.messages):
+        if msg.sender_type == "me":
+            break
+        if msg.sender_type == "other":
+            pending.append(msg.text)
+    if not pending:
+        # Nothing pending (odd, but possible): fall back to their last message.
+        pending = _recent_other_messages(snapshot)[-1:]
+    return pending
+
+
+def _asks_for_something(texts: list[str]) -> bool:
+    return any(_OPEN_REQUEST_PATTERN.search(t) for t in texts)
+
+
+def _length_budget(snapshot: ChatSnapshot) -> LengthBudget:
+    """Compute a concrete length target from the other person's recent messages.
+
+    A qualitative "mirror their length" rule buried in a long system prompt is
+    ignored by small models, so we hand them a number AND back it with a token
+    ceiling - in practice the ceiling is the only control weak models respect.
+    Two modes:
+
+    - They explicitly asked us to tell/explain something: allow a few sentences
+      (bounded by _OPEN_REPLY_WORDS) so "tell me about your day" is not cut off.
+    - Otherwise: mirror. Target about twice their average length. Plain
+      questions ("how are you?") stay here - they deserve short answers.
+    """
+    recent = _recent_other_messages(snapshot)
+    if _asks_for_something(_pending_incoming(snapshot)):
+        return LengthBudget(
+            note=(
+                "Length: they asked you to tell or explain something, so answer "
+                f"it properly - a few sentences, up to about {_OPEN_REPLY_WORDS} "
+                "words. Stay conversational and do not pad."
+            ),
+            max_tokens=_tokens_for_words(_OPEN_REPLY_WORDS, recent),
+        )
+
+    average = _average_words(recent)
+    target = int(min(max(round(average * 2), _MIN_REPLY_WORDS), _MAX_MIRROR_WORDS))
+    return LengthBudget(
+        note=(
+            f"Length: the other person's recent messages are about "
+            f"{max(round(average), 1)} words each. Keep your reply to at most "
+            f"about {target} words - one or two short sentences, nothing more. "
+            "Anything longer looks robotic next to their messages."
+        ),
+        max_tokens=_tokens_for_words(target, recent),
     )
 
 
@@ -191,7 +419,17 @@ def _snapshot_to_messages(
             role = "system"
         messages.append({"role": role, "content": msg.text})
 
-    messages.append({"role": "user", "content": "Write my next reply to this conversation."})
+    # The length target rides on the final ask, right before generation, where
+    # small models weight it most. It must NOT be a separate system message
+    # placed after the conversation turns: ChatML-style models (nous-hermes2)
+    # are not trained on mid-conversation system blocks and echo them into the
+    # reply verbatim ("system\nLength: ...\nReply: ...").
+    messages.append(
+        {
+            "role": "user",
+            "content": f"Write my next reply to this conversation. {_length_budget(snapshot).note}",
+        }
+    )
     return messages
 
 
@@ -208,21 +446,24 @@ class OllamaReplyGenerator:
 
     def generate(self, snapshot: ChatSnapshot) -> GeneratedReply:
         messages = _snapshot_to_messages(snapshot, self._personality)
+        max_tokens = self._max_tokens_for(snapshot)
         log.info(
-            "generate: persona=%s platform=%s chat=%r messages=%d model=%s temp=%.2f",
+            "generate: persona=%s platform=%s chat=%r messages=%d model=%s "
+            "temp=%.2f max_tokens=%d",
             self._personality.name,
             snapshot.platform,
             snapshot.chat.title,
             len(snapshot.messages),
             self._settings.model_name,
             self._settings.temperature,
+            max_tokens,
         )
         if LOG_PROMPTS:
             log.debug("prompt messages: %s", messages)
 
         started = time.monotonic()
-        response = self._chat(messages)
-        text = _clean_completion(response["message"]["content"])
+        response = self._chat(messages, max_tokens)
+        text = _finalize(response)
         if LOG_PROMPTS:
             log.debug("raw completion: %r", text)
 
@@ -243,8 +484,8 @@ class OllamaReplyGenerator:
                     ),
                 }
             ]
-            response = self._chat(nudge)
-            retry_text = _clean_completion(response["message"]["content"])
+            response = self._chat(nudge, max_tokens)
+            retry_text = _finalize(response)
             if _looks_like_refusal(retry_text):
                 log.warning("retry still refused; using deflection fallback")
                 text = _DEFLECTION_FALLBACK
@@ -268,7 +509,11 @@ class OllamaReplyGenerator:
             finish_reason=response.get("done_reason"),
         )
 
-    def _chat(self, messages: list[dict[str, str]]):
+    def _max_tokens_for(self, snapshot: ChatSnapshot) -> int:
+        """Generation ceiling: the computed budget, never above the configured max."""
+        return min(self._settings.max_output_tokens, _length_budget(snapshot).max_tokens)
+
+    def _chat(self, messages: list[dict[str, str]], max_tokens: int):
         settings = self._settings
         return self._client.chat(
             model=settings.model_name,
@@ -276,6 +521,6 @@ class OllamaReplyGenerator:
             options={
                 "temperature": settings.temperature,
                 "top_p": settings.top_p,
-                "num_predict": settings.max_output_tokens,
+                "num_predict": max_tokens,
             },
         )

@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 
 from responser_model_api.config import PERSONALITIES_DIR, RESPONSE_FORMAT_INSTRUCTIONS
-from responser_model_api.ollama_client import _snapshot_to_messages, _system_prompt
+from responser_model_api.ollama_client import (
+    _length_budget,
+    _snapshot_to_messages,
+    _system_prompt,
+)
 from responser_model_api.personality import (
     Personality,
     PersonalityError,
@@ -148,7 +152,7 @@ def test_examples_are_illustrations_not_conversation_turns() -> None:
 
     # The only real conversation content is the incoming message + the ask.
     assert non_system[0] == {"role": "user", "content": "how are you"}
-    assert non_system[-1]["content"] == "Write my next reply to this conversation."
+    assert non_system[-1]["content"].startswith("Write my next reply to this conversation.")
 
     # The example lives in the system prompt as an illustration instead.
     assert 'reply: "hey!"' in messages[0]["content"] or "hey!" in messages[0]["content"]
@@ -191,8 +195,13 @@ def test_no_context_message_when_absent() -> None:
 
 
 def _snapshot_with_n_messages(n: int) -> ChatSnapshot:
+    # Multi-word texts: a run of one-word messages would read as "curt" and
+    # override the history-based stage, which is not what these tests probe.
     msgs = [
-        Message(sender_type="other" if i % 2 == 0 else "me", text=f"m{i}")
+        Message(
+            sender_type="other" if i % 2 == 0 else "me",
+            text=f"this is message number {i} in the chat",
+        )
         for i in range(n)
     ]
     return ChatSnapshot(
@@ -232,4 +241,117 @@ def test_long_relationship_is_friendly_and_informal() -> None:
     assert "informal" in note
     # Informality is conditional on the situation, not unconditional.
     assert "where the conversation allows" in note
+
+
+def _snapshot(*turns: tuple[str, str]) -> ChatSnapshot:
+    return ChatSnapshot(
+        chat=ChatDescriptor(raw_id="1", title="Bob", has_unread=True),
+        messages=[Message(sender_type=who, text=text) for who, text in turns],
+    )
+
+
+def test_curt_other_person_overrides_long_history() -> None:
+    # Plenty of history, but they have gone cold ("bruh", "boring", "..."):
+    # rapport is about current engagement, not raw message count.
+    turns = [("other" if i % 2 == 0 else "me", f"a fairly normal message {i}") for i in range(16)]
+    turns += [("other", "bruh"), ("me", "hey"), ("other", "boring"), ("other", "...")]
+    note = _relationship_system_note(_snapshot(*turns))
+    assert "curt" in note
+    assert "do not push" in note
+
+
+def test_single_short_opener_is_not_curt() -> None:
+    # "hi" alone is a normal opener, not disengagement.
+    note = _relationship_system_note(_snapshot(("other", "hi")))
+    assert "NEW contact" in note
+    assert "curt" not in note
+
+
+def test_length_budget_mirrors_short_messages_with_token_cap() -> None:
+    budget = _length_budget(
+        _snapshot(("other", "hey"), ("me", "hi there"), ("other", "bruh"), ("other", "boring"))
+    )
+    # ~1 word each -> the floor of 6 words, backed by a tight generation cap
+    # (Latin text: 2 tokens/word + margin).
+    assert "about 1 words each" in budget.note
+    assert "at most about 6 words" in budget.note
+    assert budget.max_tokens == 6 * 2 + 16
+
+
+def test_length_budget_scales_with_longer_messages() -> None:
+    long = " ".join(["word"] * 15)
+    budget = _length_budget(_snapshot(("other", long), ("other", long)))
+    assert "at most about 30 words" in budget.note
+    assert budget.max_tokens == 30 * 2 + 16
+
+
+def test_length_budget_uses_bigger_token_estimate_for_cyrillic() -> None:
+    budget = _length_budget(_snapshot(("other", "привет"), ("other", "как сам")))
+    # Russian words tokenize into several tokens each; the ceiling must not
+    # cut a 6-word reply in half.
+    assert budget.max_tokens == 6 * 4 + 16
+
+
+def test_length_budget_never_exceeds_mirror_ceiling() -> None:
+    huge = " ".join(["word"] * 200)
+    budget = _length_budget(_snapshot(("other", huge)))
+    assert "at most about 40 words" in budget.note
+
+
+@pytest.mark.parametrize(
+    "incoming",
+    [
+        "tell me about your hobbies",
+        "what do you like doing on weekends",
+        "how was your day?",
+        "расскажи о себе",
+        "чем ты увлекаешься",
+    ],
+)
+def test_length_budget_opens_up_when_asked_to_elaborate(incoming: str) -> None:
+    # A short request to tell/explain deserves a real answer: a few sentences,
+    # still bounded so it cannot become an essay.
+    budget = _length_budget(_snapshot(("other", "hey"), ("me", "hi"), ("other", incoming)))
+    assert "tell or explain" in budget.note
+    assert "60 words" in budget.note
+    assert budget.max_tokens > 6 * 2 + 16
+
+
+@pytest.mark.parametrize(
+    "incoming",
+    ["Hello sweetheart\nHow are you?", "Is it AI?", "Bruh\nAre you kidding?", "you?"],
+)
+def test_plain_questions_stay_in_mirror_mode(incoming: str) -> None:
+    # Most chat messages end in '?'; that alone must NOT unlock long replies -
+    # "how are you?" from a 3-word texter wants a 1-line answer. (Live: every
+    # Test User turn hit open mode via '?' and replies ballooned to 100 tokens.)
+    budget = _length_budget(_snapshot(("other", incoming)))
+    assert "tell or explain" not in budget.note
+    assert budget.max_tokens <= 10 * 2 + 16
+
+
+def test_length_budget_only_looks_at_unanswered_messages() -> None:
+    # An old request we already answered must not keep the budget open.
+    budget = _length_budget(
+        _snapshot(("other", "tell me about your day"), ("me", "it was fine"), ("other", "cool"))
+    )
+    assert "tell or explain" not in budget.note
+
+
+def test_length_note_rides_on_final_user_ask_not_a_trailing_system_message() -> None:
+    messages = _snapshot_to_messages(_snapshot(("other", "hey")), Personality(name="Mia"))
+    last = messages[-1]
+    assert last["role"] == "user"
+    assert last["content"].startswith("Write my next reply to this conversation.")
+    assert "Length:" in last["content"]
+    # A system message after the conversation turns gets echoed verbatim by
+    # ChatML models (observed live) - no system role may follow a real turn.
+    first_turn = next(i for i, m in enumerate(messages) if m["role"] != "system")
+    assert all(m["role"] != "system" for m in messages[first_turn:])
+
+
+def test_format_instructions_read_the_room() -> None:
+    lowered = RESPONSE_FORMAT_INSTRUCTIONS.lower()
+    assert "read the room" in lowered
+    assert "dial the energy down" in lowered
 
