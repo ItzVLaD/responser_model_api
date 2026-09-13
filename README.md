@@ -283,9 +283,40 @@ RESPONSER_LOG_LEVEL=DEBUG RESPONSER_LOG_PROMPTS=true \
   reply prompt and raw model output, except that system prompts containing
   persisted context are redacted.
 - Summarization logs **metadata only**: model, message count, input size, timing,
-  token counts, and memory size; failures record only their exception type. It
+  token counts, and memory size; failures record exception types and allowlisted
+  reason codes, never arbitrary exception text. It
   never logs raw memory, summary prompts/output, or error tracebacks, even when
   reply prompt logging is enabled.
+
+### Diagnosing context-generation 502 responses
+
+A 502 from `/summarize_context` can mean **model output was rejected**, not that
+the API or Ollama was unreachable. Context errors now expose an allowlisted
+`reason` in logs and the HTTP detail without printing message text or evidence:
+
+- `output_truncated`: the completion was cut off or incomplete.
+- `delta_schema_invalid` / `output_empty`: unusable model JSON or no text.
+- `citation_message_missing`: the proposed source ID was not in the current batch.
+- `citation_quote_mismatch`: the model's quote was not a verbatim substring of
+  the message it cited.
+- `profile_speaker_mismatch`: a quote was assigned to the wrong participant.
+- `age_declaration_invalid`: the age quote is not a supported unambiguous
+  declaration (for example a question, retracted joke, or conflicting numbers).
+  First-person age sentences can include ordinary trailing clauses or emoji;
+  they no longer have to consist solely of a number-bearing declaration. Source
+  quotes are never rewritten to make them pass. This is a conservative syntax
+  check, not proof of age or exhaustive natural-language understanding.
+- `target_missing`, `target_kind_mismatch`, or another target code: invalid
+  correction/removal, not a token-budget issue.
+- `memory_validation_or_capacity`: the merged result exceeded limits or failed
+  validation. Facts are not evicted to force the update through.
+
+Rejected-output logs also include prompt/completion token counts. Smaller batches
+can reduce extraction complexity or output truncation, but cannot guarantee valid
+citations and must not bypass validation. The context checkpoint commits only
+after all batches succeed: a failed second batch leaves no new saved context on
+initial creation, so the next cycle starts again from batch one. Restart the model
+API after updating code to see the detailed reason codes.
 
 > Privacy: prompts contain private chat content, so prompt logging is **off by
 > default** and must be explicitly enabled. Ordinary reply text is still logged

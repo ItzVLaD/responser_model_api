@@ -31,8 +31,9 @@ from responser_model_api.schemas import (
 
 MAX_MEMORY_OPERATIONS = 40
 MAX_PREVIEW_ITEMS = 8
-# Deliberately narrow declaration syntax, not a semantic age extractor. A model
-# must select the corrected clause rather than a question or multi-clause joke.
+# Minimal declarations remain supported. A fullmatch alone rejects valid source
+# sentences with conversational continuations, so also recognize a conservative
+# first-person sentence form below. Neither pattern is a semantic fact checker.
 _AGE_DECLARATION = re.compile(
     r"(?:i(?:\s+am|['’]m)\s+\d{1,3}(?:\s+years\s+old)?"
     r"|\d{1,3}\s+years\s+old|(?:my\s+)?age\s*:\s*\d{1,3})"
@@ -40,9 +41,81 @@ _AGE_DECLARATION = re.compile(
     re.IGNORECASE,
 )
 
+_AGE_SENTENCE_START = re.compile(
+    r"^(?:(?:(?:and\s+)?as\s+for\s+my\s+age|well|actually|honestly|by\s+the\s+way)[,:]?\s+)?"
+    r"i(?:\s+am|['’]m)\s+(?:now\s+)?[0-9]{1,3}"
+    r"(?:\s+years\s+old)?(?!\w|\.[0-9])",
+    re.IGNORECASE,
+)
+_AGE_CORRECTION_TAIL = re.compile(r"^,?\s*not\s+[0-9]{1,3}(?!\w|\.[0-9])", re.IGNORECASE)
+_AGE_CONTINUATION = re.compile(r"^(?:[,;.!]\s*|(?:and|but|so)\b)", re.IGNORECASE)
+_AGE_UNCERTAINTY = re.compile(
+    r"\b(?:kidding|joking|joke|pretend(?:ing)?|maybe|perhaps|probably|possibly)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_age_declaration(quote: str) -> bool:
+    """Accept a literal self-declaration with ordinary trailing chat text.
+
+    Do not truncate/repair evidence to make a quote pass. Questions, explicit
+    uncertainty/retractions and multiple numbers remain conservatively rejected
+    (apart from a direct 'not N' correction). Unsupported phrasing should be
+    quoted as a shorter declaration by the extractor, not guessed here.
+    """
+    text = quote.strip()
+    if "?" in text or _AGE_UNCERTAINTY.search(text):
+        return False
+    if _AGE_DECLARATION.fullmatch(text):
+        return True
+    head = _AGE_SENTENCE_START.match(text)
+    if head is None:
+        return False
+    tail = text[head.end():].strip()
+    tail = _AGE_CORRECTION_TAIL.sub("", tail, count=1).strip()
+    if any(char.isdigit() for char in tail):
+        # Prevent accepting an age range or two conflicting age assertions.
+        return False
+    if not tail or all(unicodedata.category(char)[0] in "PSMZ" for char in tail):
+        # Terminal punctuation and emoji do not invalidate the declaration.
+        return True
+    # A word directly after the number may be a unit (months, dollars, plants)
+    # rather than an age. Only allow an explicit clause boundary/connector.
+    return _AGE_CONTINUATION.match(tail) is not None
+
+
+# Allowlisted codes, not exception text, may be logged or returned over HTTP.
+# Pydantic causes can contain private quotes; unknown messages map to a generic
+# code rather than being echoed while diagnosing failed extraction.
+MEMORY_FAILURE_REASONS: dict[str, str] = {
+    "legacy memory violates validation or capacity limits": "legacy_validation_or_capacity",
+    "citation message ID is not in the supplied batch": "citation_message_missing",
+    "citation quote must exactly match the supplied message": "citation_quote_mismatch",
+    "citation has ambiguous source speakers": "citation_speaker_ambiguous",
+    "service events cannot provide fact evidence": "citation_service_event",
+    "profile section does not match source speaker": "profile_speaker_mismatch",
+    "target section mismatch": "target_section_mismatch",
+    "target kind mismatch": "target_kind_mismatch",
+    "target speaker mismatch": "target_speaker_mismatch",
+    "replace/remove requires new evidence, not a previous source": "target_evidence_not_new",
+    "only open_threads questions or commitments may be removed": "removal_not_allowed",
+    "add must not have a target ID": "unexpected_add_target",
+    "replace/remove requires an existing target ID": "target_missing",
+    "repeated target ID conflicts within one delta": "target_repeated",
+    "age quote must contain an unambiguous age declaration, not a question": "age_declaration_invalid",
+    "relationship change requires new evidence": "relationship_evidence_not_new",
+    "replacement conflicts with another fact": "replacement_conflict",
+    "add conflicts with a replaced or removed fact": "addition_conflict",
+    "memory update violates validation or capacity limits": "memory_validation_or_capacity",
+}
+
 
 class MemoryUpdateError(ValueError):
-    """An invalid or oversized delta leaves the caller's memory unchanged."""
+    """An invalid delta; safe reason codes never expose its private source text."""
+
+    @property
+    def reason(self) -> str:
+        return MEMORY_FAILURE_REASONS.get(str(self), "invalid_memory_update")
 
 
 class MemoryOperation(BaseModel):
@@ -112,9 +185,12 @@ def migrate_legacy(memory: MemoryContent) -> MemoryContent:
 
 def _source(message_id: str, quote: str, messages: list[Message]) -> FactEvidence:
     """Repeated-ID fragments are permitted only when quote attribution is unique."""
-    matches = [message for message in messages if message.raw_id == message_id and quote in message.text]
+    sources = [message for message in messages if message.raw_id == message_id]
+    if not sources:
+        raise MemoryUpdateError("citation message ID is not in the supplied batch")
+    matches = [message for message in sources if quote in message.text]
     if not matches:
-        raise MemoryUpdateError("citation must exactly match a supplied message ID and quote")
+        raise MemoryUpdateError("citation quote must exactly match the supplied message")
     speakers = {message.sender_type for message in matches}
     if len(speakers) != 1:
         raise MemoryUpdateError("citation has ambiguous source speakers")
@@ -194,8 +270,8 @@ def _merge(
             touched.add(operation.target_id)
         evidence = _source(operation.message_id, operation.quote, messages)
         _check_attribution(operation.section, evidence)
-        if operation.kind == "age" and _AGE_DECLARATION.fullmatch(operation.quote.strip()) is None:
-            raise MemoryUpdateError("age quote must be a standalone age declaration, not a question")
+        if operation.kind == "age" and not _is_age_declaration(operation.quote):
+            raise MemoryUpdateError("age quote must contain an unambiguous age declaration, not a question")
         if operation.target_id is not None:
             _check_target(operation, evidence, targets[operation.target_id], memory.facts)
         if operation.action == "remove":

@@ -9,7 +9,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException
 
 from .config import load_active_personality, load_generation_settings, load_summary_settings
-from .context_summarizer import OllamaContextSummarizer
+from .context_summarizer import ContextSummaryError, OllamaContextSummarizer
 from .logging_config import configure_logging
 from .ollama_client import OllamaReplyGenerator
 from .schemas import (
@@ -66,6 +66,12 @@ def summarize_context(request: SummarizeContextRequest) -> SummarizeContextRespo
     """Fail closed: never substitute a reply or old memory for a failed summary."""
     try:
         return _summarizer.summarize(request)
+    except ContextSummaryError as exc:
+        log.error("context summary failed: error_type=%s reason=%s", type(exc).__name__, exc.reason)
+        raise HTTPException(
+            status_code=502,
+            detail=f"context summary failed: {exc.reason}; no memory/checkpoint update was accepted",
+        ) from None
     except Exception as exc:  # Ollama transport, missing model, or invalid output
         # Exception text/tracebacks can include chat data or model JSON. Keep
         # both the logs and public error free of that sensitive content.

@@ -13,7 +13,9 @@ from pydantic import JsonValue, ValidationError
 
 from .config import DEFAULT_MODEL, OLLAMA_HOST, SummarySettings
 from .logging_config import get_logger
-from .memory_updates import MemoryDelta, MemoryUpdateError, merge_memory_delta, migrate_legacy
+from .memory_updates import (
+    MEMORY_FAILURE_REASONS, MemoryDelta, MemoryUpdateError, merge_memory_delta, migrate_legacy,
+)
 from .schemas import MemoryContent, SummarizeContextRequest, SummarizeContextResponse
 
 log = get_logger()
@@ -33,8 +35,9 @@ inferred interests, topic labels or unknown placeholders. Quote at most 200 char
 Extract distinct durable details: each speaker's stated age, job, work specialty,
 name, interests, explicit interaction preferences, boundaries and relevant stories.
 Keep the actual values and work detail. Use separate quotes for age, occupation and
-specialty when possible. For kind age, quote only a standalone first-person age
-declaration clause, not the rest of a sentence about their job. Exclude retracted
+specialty when possible. For kind age, prefer a short first-person age declaration;
+an unambiguous sentence with trailing chat text is also valid. Keep the exact
+source wording, never rewrite it into a preferred age format. Exclude retracted
 joke ages; save the final corrected declaration instead.
 Preserve requests for curiosity and attentive follow-up. Quote behavior self-reports
 literally; classify them as self_report, not a diagnosis. Do not diagnose anxiety.
@@ -61,22 +64,33 @@ Never fabricate record IDs or checkpoint metadata. The program creates new fact 
 """
 
 
+_SAFE_FAILURE_REASONS = frozenset(MEMORY_FAILURE_REASONS.values()) | {
+    "invalid_memory_update", "invalid_output", "output_truncated", "output_empty", "delta_schema_invalid",
+}
+
+
 class ContextSummaryError(RuntimeError):
-    """An unusable model completion; safe to report without private content."""
+    """Report an allowlisted failure code without serializing model/chat content."""
+
+    def __init__(self, message: str, *, reason: str = "invalid_output") -> None:
+        super().__init__(message)
+        self.reason = reason if reason in _SAFE_FAILURE_REASONS else "invalid_output"
 
 
 def _validated_delta(response: ChatResponse) -> MemoryDelta:
     """Reject incomplete or malformed output instead of repairing it silently."""
     if response.done_reason == "length" or response.done is False:
-        raise ContextSummaryError("summary completion was truncated or incomplete")
+        raise ContextSummaryError("summary completion was truncated or incomplete", reason="output_truncated")
     content = response.message.content
     if not content or not content.strip():
-        raise ContextSummaryError("summary completion was empty")
+        raise ContextSummaryError("summary completion was empty", reason="output_empty")
     try:
         return MemoryDelta.model_validate_json(content, strict=True)
     except ValidationError:
         # Validation errors embed the rejected JSON, so never log/rethrow them.
-        raise ContextSummaryError("summary completion did not match the memory delta schema") from None
+        raise ContextSummaryError(
+            "summary completion did not match the memory delta schema", reason="delta_schema_invalid",
+        ) from None
 
 
 def _grammar_schema(value: JsonValue) -> JsonValue:
@@ -156,12 +170,27 @@ class OllamaContextSummarizer:
             },
             keep_alive=self._keep_alive,
         )
-        delta = _validated_delta(response)
+        try:
+            delta = _validated_delta(response)
+        except ContextSummaryError as exc:
+            log.warning(
+                "summary output rejected: reason=%s prompt_tokens=%s completion_tokens=%s",
+                exc.reason, response.prompt_eval_count, response.eval_count,
+            )
+            raise
         try:
             memory = merge_memory_delta(previous, delta, request.messages)
-        except MemoryUpdateError:
+        except MemoryUpdateError as exc:
             # Invalid operations/validation tracebacks may contain private quotes.
-            raise ContextSummaryError("memory delta has invalid evidence, targets, or exceeds capacity") from None
+            log.warning(
+                "summary delta rejected: reason=%s operations=%d previous_facts=%d "
+                "prompt_tokens=%s completion_tokens=%s",
+                exc.reason, len(delta.operations), len(previous.facts) if previous else 0,
+                response.prompt_eval_count, response.eval_count,
+            )
+            raise ContextSummaryError(
+                "memory delta has invalid evidence, targets, or exceeds capacity", reason=exc.reason,
+            ) from None
         log.info(
             "summarized: model=%s elapsed_ms=%.0f prompt_tokens=%s "
             "completion_tokens=%s memory_chars=%d operations=%d facts=%d",

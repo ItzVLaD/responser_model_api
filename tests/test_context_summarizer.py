@@ -201,6 +201,68 @@ def test_first_extraction_schema_allows_additions_only(monkeypatch: pytest.Monke
     assert properties["target_id"] == {"type": "null", "default": None}
 
 
+@pytest.mark.parametrize("age_quote", [
+    "I'm 23 and loving every second of it!",
+    "And as for my age, I'm 23 and loving every second of it!",
+    "I’m 18 🙂",
+])
+def test_second_batch_accepts_literal_age_sentence_without_losing_other_facts(
+    monkeypatch: pytest.MonkeyPatch, age_quote: str,
+) -> None:
+    previous = _previous_memory()
+    request = SummarizeContextRequest(previous=previous, messages=[
+        Message(sender_type="me", text=age_quote, raw_id="age-source"),
+        Message(sender_type="other", text="I design gardens.", raw_id="specialty-source"),
+    ])
+    delta = MemoryDelta(operations=[
+        _operation(age_quote, kind="age", section="agent", message_id="age-source"),
+        _operation("I design gardens.", kind="specialty", message_id="specialty-source"),
+    ])
+    summarizer, calls = _stub_summary(monkeypatch, delta.model_dump_json())
+    monkeypatch.setattr(app_module, "_summarizer", summarizer)
+    original = previous.model_dump_json()
+    response = TestClient(app_module.app).post("/summarize_context", json=request.model_dump())
+    assert response.status_code == 200
+    updated = SummarizeContextResponse.model_validate(response.json()).memory
+    assert updated.facts[:len(previous.facts)] == previous.facts
+    age_fact = updated.facts[-2]
+    assert age_fact.kind == "age" and age_fact.text == age_quote
+    assert age_fact.evidence == FactEvidence(message_id="age-source", sender_type="me", quote=age_quote)
+    assert updated.facts[-1].text == "I design gardens."
+    assert previous.model_dump_json() == original
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("failure,quote,sender,reason", [
+    ("question", "Are you 23?", "me", "age_declaration_invalid"),
+    ("retraction", "I'm 23. Just kidding.", "me", "age_declaration_invalid"),
+    ("mismatch", "I'm 23 and loving life!", "me", "citation_quote_mismatch"),
+    ("speaker", "I'm 23 and loving life!", "other", "profile_speaker_mismatch"),
+])
+def test_invalid_age_operation_still_aborts_the_entire_batch(
+    monkeypatch: pytest.MonkeyPatch, failure: str, quote: str, sender: str, reason: str,
+) -> None:
+    previous = _previous_memory()
+    original = previous.model_dump_json()
+    delta = MemoryDelta(operations=[
+        _operation("I design gardens.", kind="specialty", message_id="specialty-source"),
+        _operation(quote, section="agent", kind="age", message_id="age-source"),
+    ])
+    summarizer, calls = _stub_summary(monkeypatch, delta.model_dump_json())
+    monkeypatch.setattr(app_module, "_summarizer", summarizer)
+    response = TestClient(app_module.app).post("/summarize_context", json={
+        "previous": previous.model_dump(),
+        "messages": [
+            {"sender_type": "other", "text": "I design gardens.", "raw_id": "specialty-source"},
+            {"sender_type": sender, "text": "I'm 24." if failure == "mismatch" else quote, "raw_id": "age-source"},
+        ],
+    })
+    assert response.status_code == 502 and reason in response.json()["detail"]
+    assert "memory" not in response.json()
+    assert previous.model_dump_json() == original
+    assert len(calls) == 1
+
+
 def test_summary_prompt_has_evidence_and_privacy_rules(monkeypatch: pytest.MonkeyPatch) -> None:
     summarizer, calls = _stub_summary(monkeypatch)
     summarizer.summarize(_request())
@@ -487,6 +549,67 @@ def test_late_invalid_operation_returns_502_without_mutation_or_partial_result(
     assert response.status_code == 200
     assert SummarizeContextResponse.model_validate(response.json()).memory == request.previous
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("failure,reason", [
+    ("missing-message", "citation_message_missing"),
+    ("paraphrased-quote", "citation_quote_mismatch"),
+    ("wrong-speaker", "profile_speaker_mismatch"),
+    ("missing-target", "target_missing"),
+    ("truncated", "output_truncated"),
+    ("malformed", "delta_schema_invalid"),
+    ("empty", "output_empty"),
+])
+def test_502_exposes_safe_failure_reason_without_private_data(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    failure: str, reason: str,
+) -> None:
+    private = "PRIVATE_QUOTED_MESSAGE"
+    message_id = "PRIVATE_SOURCE_ID"
+    operation = MemoryOperation(
+        action="add", section="interlocutor", kind="preference",
+        message_id=message_id, quote=private,
+    )
+    if failure == "missing-message":
+        operation.message_id = "PRIVATE_MISSING_ID"
+    elif failure == "paraphrased-quote":
+        operation.quote = "PRIVATE_INVENTED_PARAPHRASE"
+    elif failure == "wrong-speaker":
+        operation.section = "agent"
+    elif failure == "missing-target":
+        operation.action = "replace"
+        operation.target_id = "PRIVATE_TARGET_ID"
+    content = MemoryDelta(operations=[operation]).model_dump_json()
+    if failure == "malformed":
+        content = '{"unexpected":"PRIVATE_OUTPUT"}'
+    elif failure == "empty":
+        content = ""
+    summarizer, calls = _stub_summary(
+        monkeypatch, content, done_reason="length" if failure == "truncated" else "stop",
+    )
+    monkeypatch.setattr(app_module, "_summarizer", summarizer)
+    monkeypatch.setattr(summary_module.log, "propagate", True)
+    caplog.set_level(logging.INFO, logger=summary_module.log.name)
+    response = TestClient(app_module.app).post("/summarize_context", json={
+        "messages": [{"sender_type": "other", "raw_id": message_id, "text": private}],
+    })
+    assert response.status_code == 502
+    assert reason in response.json()["detail"]
+    assert f"reason={reason}" in caplog.text
+    assert "prompt_tokens=90 completion_tokens=40" in caplog.text
+    assert "PRIVATE_" not in caplog.text + response.text
+    assert len(calls) == 1
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+def test_unknown_error_text_is_never_used_as_public_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(request: SummarizeContextRequest) -> SummarizeContextResponse:
+        raise ContextSummaryError("PRIVATE_MESSAGE", reason="PRIVATE_REASON")
+
+    monkeypatch.setattr(app_module._summarizer, "summarize", fail)
+    response = TestClient(app_module.app).post("/summarize_context", json=_request().model_dump())
+    assert response.status_code == 502
+    assert "invalid_output" in response.text and "PRIVATE" not in response.text
 
 
 @pytest.mark.parametrize("content", [

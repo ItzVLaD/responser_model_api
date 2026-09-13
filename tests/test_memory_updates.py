@@ -123,6 +123,56 @@ def test_minimal_age_declarations_are_supported(quote: str) -> None:
 
 
 @pytest.mark.parametrize("quote", [
+    "I'm 23 and loving every second of it!",
+    "And as for my age, I'm 23 and loving every second of it!",
+    "I'm 24 and a lab technician. I went kayaking on Sunday.",
+    "I am 29 years old and work as a designer.",
+    "Actually, I'm 30, not 29.",
+    "I'm 29, and I enjoy hiking.",
+    "I'm 29. I enjoy hiking.",
+    "I’m 18 🙂",
+    "I am 29! 😊",
+])
+def test_natural_age_sentences_preserve_verbatim_evidence(quote: str) -> None:
+    memory = _profiles()
+    original = memory.model_dump_json()
+    operation = _operation(quote, section="agent", kind="age", message_id="age-source")
+    result = merge_memory_delta(memory, MemoryDelta(operations=[operation]), [
+        _message(quote, "age-source", "me"),
+    ])
+    fact = result.facts[-1]
+    assert fact.text == quote
+    assert fact.evidence == FactEvidence(message_id="age-source", sender_type="me", quote=quote)
+    assert result.facts[:-1] == memory.facts
+    assert memory.model_dump_json() == original
+
+
+def test_sentence_age_correction_replaces_only_targeted_fact() -> None:
+    memory = _profiles()
+    quote = "Actually, I'm 30, not 29."
+    updated = _merge_one(memory, _operation(quote, kind="age", action="replace", target=memory.facts[0].id))
+    assert updated.facts[0].text == quote
+    assert updated.facts[1:] == memory.facts[1:]
+
+
+@pytest.mark.parametrize("quote", [
+    "I'm 29? Maybe.", "If I'm 29, is that okay?", "If I'm 29, I'll celebrate.",
+    "She said I'm 29.", 'He said "I am 29".', "I'm 29 or 30.",
+    "I'm 29. I'm 30.", "I'm 29. Just kidding.", "I'm 29 and joking.",
+    "I'm 29 months old.", "I'm 29 dollars short.", "I'm 29.5 years old.",
+    "I'm 2900", "I'm 29th in line.", "I'm 29 years old, just kidding.",
+    "I'm 29, maybe.", "Maybe I'm 29.",
+])
+def test_natural_sentence_support_still_rejects_ambiguous_age_quotes(quote: str) -> None:
+    memory = _profiles()
+    before = memory.model_dump_json()
+    with pytest.raises(MemoryUpdateError) as error:
+        _merge_one(memory, _operation(quote, kind="age"))
+    assert error.value.reason == "age_declaration_invalid"
+    assert memory.model_dump_json() == before
+
+
+@pytest.mark.parametrize("quote", [
     "Are you 29?", "I am 29?", "29", "He is 29 years old", "My sister is 29 years old",
     "I have 29 plants", "I am 29 plants tall", "I'm 73. Just kidding, I'm 29.",
 ])
@@ -148,6 +198,18 @@ def test_corrected_age_clause_is_selected_verbatim_not_inferred_by_regex() -> No
 def test_false_ids_quotes_missing_ids_wrong_speakers_and_system_sources_fail(messages: list[Message]) -> None:
     with pytest.raises(MemoryUpdateError):
         merge_memory_delta(None, MemoryDelta(operations=[_operation("I like tea.")]), messages)
+
+
+def test_failure_reason_distinguishes_missing_source_from_changed_quote() -> None:
+    operation = _operation("I like tea.", message_id="source")
+    for text, mid, reason in (
+        ("I like tea.", "different", "citation_message_missing"),
+        ("I like coffee.", "source", "citation_quote_mismatch"),
+    ):
+        with pytest.raises(MemoryUpdateError) as error:
+            merge_memory_delta(None, MemoryDelta(operations=[operation]), [_message(text, mid)])
+        assert error.value.reason == reason
+    assert MemoryUpdateError("PRIVATE_UNKNOWN_ERROR").reason == "invalid_memory_update"
 
 
 def test_repeated_id_fragments_resolve_by_exact_quote_and_unambiguous_speaker() -> None:
