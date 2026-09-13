@@ -127,9 +127,9 @@ The two endpoints are independent. A client that uses persisted context must
 
 1. Send `POST /summarize_context` with `previous` (the last `MemoryContent`, or
   `null`) and `messages` (a chronological batch of **1–30** `Message` objects).
-  The response is `{memory, model_name}`: a complete replacement memory, not a
-  delta. Pass the previous memory on every subsequent batch so relevant older
-  facts, agent claims, and pending topics can be retained.
+  The response is `{memory, model_name}`: the complete memory **merged by code**.
+  Internally the model produces only evidence-backed operations, not a rewritten
+  summary. Pass previous memory on every batch; unrelated facts remain unchanged.
 2. Only after success, the reader persists a `ConversationContext` containing
   `memory`, `last_message_id`, `summarized_message_count` (at least 1),
   `model_name`, and `updated_at`. Metadata strings must be nonempty. The reader,
@@ -143,27 +143,81 @@ The two endpoints are independent. A client that uses persisted context must
   summarized messages are not repeated as raw turns. Relationship guidance uses persisted evidence
   rather than the visible message count, with current boundaries taking priority.
 
-`MemoryContent` has four lists: `interlocutor`, `agent`, `interaction`, and
-`open_threads`. Each defaults to empty and holds at most **8 nonempty strings of
-200 characters**. `relationship` contains `stage` (`unknown`, `new`, `acquaintance`,
-`familiar`, or `strained`; default `unknown`) and `evidence` (at most **300
-characters**, default empty). All new contract models reject unknown fields.
-Complete memory serialized with `model_dump_json()` is limited to **6,000
-characters**, including JSON escaping and field overhead.
+### Protected fact records (API 0.3.0)
 
-The complete summary request serialized with `model_dump_json()` is limited to
-**12,000 UTF-8 bytes**, including previous memory, message metadata, JSON escaping,
-and field overhead. A batch with 6,000 text bytes plus a 6,000-character memory
-may exceed that cap: clients must measure the whole request and reduce the batch,
-not silently discard old memory. The output schema and fixed prompt additionally
-consume model context, outside this request byte limit. The defaults reserve room
-for them and a 2,048-token completion in an 8,192-token window; byte limits are not
-exact tokenizer limits, so reduce batch sizes before shrinking the window.
+`MemoryContent.facts` is the canonical collection, up to **64** records. Each has
+a code-generated ID, section, kind, exact text, and evidence containing a source
+message ID, speaker and verbatim quote (up to 200 characters). Stored text must
+equal that quote. This avoids turning a speaker's words into an invented paraphrase.
+
+The model proposes `add`, `replace`, or `remove` operations. Code checks citations
+against the current input, checks speaker attribution, validates targets, and
+applies the entire delta atomically. Replacements must target a previous fact of
+the same section/kind and speaker with fresh evidence. Removals are restricted to
+resolved open-thread questions/commitments; profile facts cannot be silently
+deleted. Omitted facts are preserved. Repeated normalized quotes are deduplicated
+without rewriting their original provenance; semantic paraphrase deduplication is
+not guaranteed. When no previous facts exist, constrained decoding allows only
+additions. Later targets are constrained to existing IDs.
+
+The four old lists (`interlocutor`, `agent`, `interaction`, `open_threads`) remain
+bounded **previews**: up to 8 strings of 200 characters per section, 6,000 serialized
+characters in total including relationship. Reply prompts use **all canonical
+facts**, not just these previews, with attribution and without IDs/duplicated source
+proofs. `relationship_source` stores the quote supporting a relationship change;
+an omitted relationship update keeps the existing stage.
+
+Existing contexts load without resetting checkpoints. At their next summary update,
+legacy strings become deterministic `legacy-unverified` records without fabricated
+citations. This preserves existing mistakes too; migration is not a factual repair.
+Do not edit preview lists expecting to change canonical facts. Both services must
+be upgraded together: older readers do not understand the added fields.
+
+There is **no silent eviction** when memory fills. The 64-fact limit, **48,000-byte**
+persisted-memory cap, or model-input budget can require operator review. An update
+that exceeds capacity fails and leaves the old file/checkpoint unchanged.
+
+Memory extraction prioritizes **actual values**, not topic labels: both speakers'
+stated ages, exact jobs and specialties, explicit communication preferences,
+boundaries, and reactions with their triggers. Retracted jokes must not replace
+corrected ages; questions must not be stored as facts about the questioner.
+Behavior observations and self-reports are distinct—do not infer an anxiety
+diagnosis from impatience. Unrelated later batches must retain earlier facts.
+
+The API converts `me`/`other`/`system` to absolute `AGENT`/`INTERLOCUTOR`/
+`SERVICE_EVENT` labels in the summarizer's model input. This does not change the
+HTTP contract. The summary prompt contains no invented conversation examples:
+small models can mistake such examples for facts to retain.
+
+**Valid JSON does not guarantee correct memory.** A live Qwen check found speaker
+attribution and detail-retention errors that mocked tests cannot detect. The
+opt-in semantic evaluation in `tests/test_context_quality_live.py` uses invented
+profiles across several updates; enable `RESPONSER_RUN_LIVE_CONTEXT_TESTS=1` to
+run it against local Ollama. It is deliberately stricter than schema validation
+and may expose remaining model limitations. Prompt changes cannot restore facts
+already dropped before a saved checkpoint; those require a from-scratch rebuild
+from the original messages, not another update of the lossy memory.
+
+The evaluations separate **retention** (seeded, source-verified facts survive an
+unrelated real-model update) from **extraction completeness** (all useful details
+must be found in new messages). The first passed with local Qwen2.5:7b; the second
+still exposed missing job/specialty details. Evidence validation rejects fabricated
+quotes and wrong-speaker profile entries but cannot prove every fact was found or
+that the model selected the correct fact to replace. The strict completeness test
+is left enabled within the opt-in suite; it is not weakened to conceal omissions.
+
+Wire requests may contain up to **64,000 UTF-8 bytes** including stored proofs.
+The **12,000-byte** limit applies separately to `inference_payload()`: compact
+previous fact IDs/text plus the current messages, without duplicate previews or
+proofs. Reader batching validates both budgets. Legacy migration adds target IDs,
+so a near-limit legacy request can be rejected after migration rather than silently
+truncated. Schema/prompt tokens are additional; byte caps are not exact tokenizer
+limits. Defaults use a 2,048-token completion in an 8,192-token model window.
 
 Invalid/oversized requests return **422** before inference. Missing models,
-inference errors, malformed or schema-invalid output, and length-truncated output
+inference errors, invalid evidence/targets, malformed or schema-invalid output, and length-truncated output
 return **502**. No partial summary, old-memory fallback, reply fallback, or retry
-is substituted. Valid empty structured memory is allowed for greetings. On any
+is substituted. A valid empty delta preserves all old facts. On any
 failure, the reader must keep its previous checkpoint and **not generate/send a
 reply**; this ordering is a client responsibility, not an implicit endpoint call.
 
@@ -178,9 +232,11 @@ particularly on a 16 GB machine; initial history batches may be slow.
 
 Privacy: reader-side context is sensitive local chat data. Protect it like chat
 history, exclude it from version control, and keep deletion/retention under the
-reader's control. The summary prompt excludes secrets, passwords, OTP/access codes,
+reader's control. Exact source excerpts are now persisted as proof; they are private
+chat content, not anonymized metadata. The prompt excludes secrets, passwords, OTP/access codes,
 filler, and embedded instructions, but model extraction is not a guaranteed secret
-filter or fact checker. Review stored memory as needed. Both previous memory and
+filter or fact checker. A real quote proves its source, not its truth, correct
+semantic classification, or completeness. Review stored memory as needed. Both previous memory and
 messages are treated as untrusted evidence; summaries never receive a reply persona.
 
 ## Configuration (env vars)

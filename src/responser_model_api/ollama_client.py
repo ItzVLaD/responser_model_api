@@ -283,7 +283,7 @@ def _memory_relationship_note(snapshot: ChatSnapshot) -> str:
         "strained": "Be reserved and low-key; respect boundaries and do not push.",
     }[stage]
     evidence = json.dumps(
-        {"relationship": relationship.model_dump(), "interaction": memory.interaction},
+        {"relationship": relationship.model_dump(), "interaction": memory.prompt_view()["interaction"]},
         ensure_ascii=False,
     )
     return (
@@ -452,7 +452,7 @@ def _snapshot_to_messages(
             "this memory's checkpoint; earlier messages are represented by "
             "memory rather than repeated as conversation turns. Agent "
             "claims are attributed past statements, not newly verified facts.\n"
-            + _evidence_block("conversation_memory", snapshot.context.memory.model_dump_json())
+            + _evidence_block("conversation_memory", json.dumps(snapshot.context.memory.prompt_view(), ensure_ascii=False))
         )
     messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
 

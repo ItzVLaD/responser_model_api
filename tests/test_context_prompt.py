@@ -12,6 +12,7 @@ from ollama import ChatResponse
 from responser_model_api import app as app_module
 from responser_model_api import ollama_client as reply_module
 from responser_model_api.config import GenerationSettings, RESPONSE_FORMAT_INSTRUCTIONS
+from responser_model_api.memory_updates import MemoryDelta, MemoryOperation, merge_memory_delta, migrate_legacy
 from responser_model_api.ollama_client import (
     OllamaReplyGenerator,
     _length_budget,
@@ -67,6 +68,44 @@ def test_context_is_in_first_system_prompt_and_raw_messages_win() -> None:
         assert metadata not in prompt
     first_turn = next(i for i, message in enumerate(messages) if message["role"] != "system")
     assert all(message["role"] != "system" for message in messages[first_turn:])
+
+
+def test_canonical_facts_beyond_eight_are_attributed_without_ids_or_proofs() -> None:
+    legacy_note = "An older unverified rapport note."
+    previous = migrate_legacy(MemoryContent(interaction=[legacy_note]))
+    sources = [
+        Message(sender_type="other", text=f'I call route {index} "the scenic one".', raw_id=f"SOURCE_OTHER_{index}")
+        for index in range(12)
+    ] + [Message(sender_type="me", text="I spent Sunday painting.", raw_id="SOURCE_AGENT")]
+    delta = MemoryDelta(operations=[MemoryOperation(
+        action="add", section="agent" if source.sender_type == "me" else "interlocutor",
+        kind="story" if source.sender_type == "me" else "interest",
+        message_id=str(source.raw_id), quote=source.text,
+    ) for source in sources])
+    memory = merge_memory_delta(previous, delta, sources)
+    assert len(memory.interlocutor) == 8
+    assert len([fact for fact in memory.facts if fact.section == "interlocutor"]) == 12
+    messages = _snapshot_to_messages(_snapshot(memory), Personality(name="Alex"))
+    first = messages[0]
+    assert first["role"] == "system"
+    encoded = first["content"].split("<conversation_memory>\n", 1)[1].split("\n</conversation_memory>", 1)[0]
+    view = json.loads(encoded)
+    assert view["interlocutor"] == [
+        f"other [interest]: {json.dumps(source.text)}" for source in sources[:12]
+    ]
+    assert view["agent"] == [f"me [story]: {json.dumps(sources[-1].text)}"]
+    assert view["interaction"] == [f"unattributed [other; legacy-unverified]: {json.dumps(legacy_note)}"]
+    assert set(view) == {"interlocutor", "agent", "interaction", "open_threads", "relationship"}
+    prompt = json.dumps(messages)
+    for fact in memory.facts:
+        assert fact.id not in prompt
+        if fact.evidence is not None:
+            assert fact.evidence.message_id not in prompt
+    for metadata in (
+        "CHECKPOINT_ID", "CHECKPOINT_MODEL", "CHECKPOINT_TIMESTAMP", "9876",
+        "relationship_source", "message_id", "sender_type",
+    ):
+        assert metadata not in prompt
 
 
 def test_memory_cannot_forge_its_delimiters() -> None:
