@@ -9,8 +9,12 @@ Environment variables:
   RESPONSER_LOG_FILE     Path of the log file. Defaults to ``logs/model_api.log``.
                          Set to an empty string to disable file logging.
   RESPONSER_LOG_PROMPTS  If "true", DEBUG logs include the full prompt messages
-                         and raw model output. Off by default to avoid writing
+                                                 and raw model output for REPLIES. Off by default to avoid writing
                          private chat content to logs.
+    RESPONSER_CONTEXT_TRACE  Separate opt-in full summary traces, default false.
+    RESPONSER_CONTEXT_TRACE_DIR  Protected trace directory (see summary_trace.py).
+
+Context tracing never routes raw summary data through these logging handlers.
 """
 
 from __future__ import annotations

@@ -67,7 +67,10 @@ def summarize_context(request: SummarizeContextRequest) -> SummarizeContextRespo
     try:
         return _summarizer.summarize(request)
     except ContextSummaryError as exc:
-        log.error("context summary failed: error_type=%s reason=%s", type(exc).__name__, exc.reason)
+        log.error(
+            "context summary failed: error_type=%s reason=%s summary_id=%s",
+            type(exc).__name__, exc.reason, exc.summary_id,
+        )
         raise HTTPException(
             status_code=502,
             detail=f"context summary failed: {exc.reason}; no memory/checkpoint update was accepted",

@@ -173,7 +173,7 @@ class SummarizeContextRequest(BaseModel):
 
     @model_validator(mode="after")
     def check_serialized_size(self) -> Self:
-        """Budget the exact projection passed to inference, not duplicated proofs."""
+        """Budget the shared compact projection; API-only selection has its own cap."""
         if len(self.model_dump_json().encode("utf-8")) > MAX_SUMMARY_WIRE_BYTES:
             raise ValueError("serialized summary wire input exceeds 64000 UTF-8 bytes")
         if len(self.inference_payload().encode("utf-8")) > MAX_SUMMARY_INPUT_BYTES:
@@ -181,7 +181,7 @@ class SummarizeContextRequest(BaseModel):
         return self
 
     def inference_payload(self) -> str:
-        """Return the exact compact JSON input, using absolute speaker labels."""
+        """Return the shared compact budgeting projection, using absolute speaker labels."""
         speakers = {"me": "AGENT", "other": "INTERLOCUTOR", "system": "SERVICE_EVENT"}
         return json.dumps({
             "previous": self.previous.summary_view() if self.previous is not None else None,

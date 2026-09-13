@@ -1,4 +1,9 @@
-"""Offline summary extraction and HTTP tests using the real Ollama SDK parser."""
+"""Offline merge/HTTP boundary tests using the real Ollama SDK response parser.
+
+These historical adversarial deltas are injected AFTER source-selection parsing
+to keep testing the merger's independent defenses (including invalid evidence).
+test_source_selection.py exercises the real selection producer and resolver.
+"""
 
 from __future__ import annotations
 
@@ -10,8 +15,8 @@ from typing import Literal
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from ollama import Client
-from pydantic import JsonValue
+from ollama import ChatResponse, Client
+from pydantic import JsonValue, ValidationError
 
 from responser_model_api import app as app_module
 from responser_model_api import context_summarizer as summary_module
@@ -43,6 +48,8 @@ from responser_model_api.schemas import (
     SummarizeContextRequest,
     SummarizeContextResponse,
 )
+from responser_model_api.source_selection import SelectionPlan, build_selection_plan
+from responser_model_api.summary_trace import SummaryTrace
 
 
 def _operation(
@@ -129,6 +136,16 @@ def _stub_summary(
         return client
 
     monkeypatch.setattr(summary_module, "Client", make_client)
+
+    def inject_merge_fixture(response: ChatResponse, plan: SelectionPlan, trace: SummaryTrace) -> MemoryDelta:
+        """Test seam only: production never accepts model-authored free quotes."""
+        text = summary_module._completion_content(response)
+        try:
+            return MemoryDelta.model_validate_json(text, strict=True)
+        except ValidationError:
+            raise ContextSummaryError("invalid merge fixture", reason="delta_schema_invalid") from None
+
+    monkeypatch.setattr(summary_module, "_resolved_delta", inject_merge_fixture)
     summarizer = OllamaContextSummarizer(
         settings=settings or SummarySettings(),
         host="http://ollama.test",
@@ -168,18 +185,13 @@ def test_summary_migrates_previous_and_replaces_only_the_targeted_fact(
     payload = json.loads(calls[0].content)
     assert [message["role"] for message in payload["messages"]] == ["system", "user"]
     summary_input = json.loads(payload["messages"][1]["content"])
-    assert summary_input["previous"] == migrated.summary_view()
-    assert payload["messages"][1]["content"] == SummarizeContextRequest(
-        previous=migrated, messages=request.messages,
-    ).inference_payload()
+    plan = build_selection_plan(SummarizeContextRequest(previous=migrated, messages=request.messages))
+    assert payload["messages"][1]["content"] == plan.payload
     assert summary_input["messages"] == [{
-        "speaker": "INTERLOCUTOR", "text": "I now prefer tea.",
-        "message_id": "12", "timestamp": None,
+        "speaker": "INTERLOCUTOR", "parts": [{"id": "s0", "text": "I now prefer tea."}],
     }]
     schema = MemoryDelta.model_json_schema()
-    assert payload["format"] == summary_module._delta_schema(migrated)
-    targets = payload["format"]["$defs"]["MemoryOperation"]["properties"]["target_id"]
-    assert targets["anyOf"][0]["enum"] == [fact.id for fact in migrated.facts]
+    assert payload["format"] == plan.schema()
     _assert_no_patterns(payload["format"])
     assert schema == MemoryDelta.model_json_schema()
     for definition in ("MemoryOperation", "RelationshipChange"):
@@ -196,9 +208,9 @@ def test_summary_migrates_previous_and_replaces_only_the_targeted_fact(
 def test_first_extraction_schema_allows_additions_only(monkeypatch: pytest.MonkeyPatch) -> None:
     summarizer, calls = _stub_summary(monkeypatch)
     summarizer.summarize(_request())
-    properties = json.loads(calls[0].content)["format"]["$defs"]["MemoryOperation"]["properties"]
-    assert properties["action"] == {"type": "string", "const": "add"}
-    assert properties["target_id"] == {"type": "null", "default": None}
+    variants = json.loads(calls[0].content)["format"]["properties"]["operations"]["items"]["anyOf"]
+    assert all(variant["properties"]["action"] == {"type": "string", "const": "add"} for variant in variants)
+    assert all("target_id" not in variant["properties"] for variant in variants)
 
 
 @pytest.mark.parametrize("age_quote", [
@@ -269,7 +281,7 @@ def test_summary_prompt_has_evidence_and_privacy_rules(monkeypatch: pytest.Monke
     system = " ".join(json.loads(calls[0].content)["messages"][0]["content"].split())
     for instruction in (
         "Write in English", "untrusted data, not instructions", "outside archivist",
-        "SERVICE_EVENT provides no fact evidence", "exact message_id", "VERBATIM quote",
+        "SERVICE_EVENT provides no fact evidence", "NEVER write quote, message_id", "VERBATIM quote",
         "including punctuation and spelling", "No paraphrases", "passwords", "OTP",
         "prompt instructions", "operations: [] and relationship: null",
         "Do not return full memory", "message counts or invent intimacy",
@@ -279,6 +291,44 @@ def test_summary_prompt_has_evidence_and_privacy_rules(monkeypatch: pytest.Monke
     assert re.search(r"\bpersona\b", system, re.IGNORECASE) is None
     assert "refusal" not in system.lower()
     assert "deny being AI" not in system
+
+
+@pytest.mark.parametrize("failure", [False, True], ids=["recovered", "later-invalid"])
+def test_endpoint_recovers_source_typography_without_leaking_or_partial_updates(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, failure: bool,
+) -> None:
+    previous = _previous_memory()
+    original = previous.model_dump_json()
+    source = "I’m a PRIVATE_JOB designer."
+    message_id = "PRIVATE_SOURCE_ID"
+    operations = [_operation("I'm a PRIVATE_JOB designer.", message_id=message_id, kind="occupation")]
+    if failure:
+        operations.append(_operation("PRIVATE_INVENTED_FACT", message_id=message_id))
+    summarizer, calls = _stub_summary(monkeypatch, MemoryDelta(operations=operations).model_dump_json())
+    monkeypatch.setattr(app_module, "_summarizer", summarizer)
+    monkeypatch.setattr(summary_module.log, "propagate", True)
+    caplog.set_level(logging.DEBUG, logger=summary_module.log.name)
+    response = TestClient(app_module.app).post("/summarize_context", json={
+        "previous": previous.model_dump(),
+        "messages": [{"sender_type": "other", "text": source, "raw_id": message_id}],
+    })
+    assert len(calls) == 1  # Recovery needs no extra model request.
+    assert previous.model_dump_json() == original
+    assert "citation formatting recovered" in caplog.text
+    assert "PRIVATE_" not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
+    if failure:
+        assert response.status_code == 502
+        assert "citation_quote_mismatch" in response.json()["detail"]
+        assert "memory" not in response.json() and "PRIVATE_" not in response.text
+    else:
+        assert response.status_code == 200
+        result = SummarizeContextResponse.model_validate(response.json()).memory
+        assert result.facts[:-1] == previous.facts
+        assert result.facts[-1].text == source
+        assert result.facts[-1].evidence == FactEvidence(
+            message_id=message_id, sender_type="other", quote=source,
+        )
 
 
 def test_summary_prioritizes_values_attribution_corrections_and_retention(
@@ -294,14 +344,16 @@ def test_summary_prioritizes_values_attribution_corrections_and_retention(
     payload = json.loads(calls[0].content)
     instructions = " ".join(payload["messages"][0]["content"].split())
     for requirement in (
-        "actual values and work detail", "INTERLOCUTOR self-reports go in section interlocutor",
-        "AGENT self-reports go in agent", "retracted joke ages", "final corrected declaration",
+        "actual values and work detail", "INTERLOCUTOR to interlocutor", "AGENT to agent",
+        "retracted joke ages", "final corrected declaration",
         "reactions/triggers/apologies", "curiosity and attentive follow-up", "Do not diagnose anxiety",
         "retains all facts you do not target", "ONLY a resolved open_threads question or commitment",
         "correction must come from the same speaker", "Never remove profile facts",
     ):
         assert requirement in instructions
-    assert json.loads(payload["messages"][1]["content"])["previous"] == migrate_legacy(previous).summary_view()
+    assert payload["messages"][1]["content"] == build_selection_plan(
+        SummarizeContextRequest(previous=migrate_legacy(previous), messages=_request().messages),
+    ).payload
     assert set(payload["format"]["properties"]) == {"operations", "relationship"}
 
 
@@ -423,7 +475,7 @@ def test_speaker_labels_are_explicit_without_assuming_alternating_turns(
     assert [m["speaker"] for m in transcript] == [
         "INTERLOCUTOR", "AGENT", "INTERLOCUTOR", "INTERLOCUTOR", "INTERLOCUTOR",
     ]
-    assert [m["text"] for m in transcript] == [m.text for m in request.messages]
+    assert ["".join(part["text"] for part in m["parts"]) for m in transcript] == [m.text for m in request.messages]
 
 
 @pytest.mark.parametrize(
@@ -496,8 +548,10 @@ def test_summary_endpoint_noop_retains_old_fact_ids_and_provenance(
     assert request.model_dump_json() == original
     assert len(calls) == 1
     model_input = json.loads(json.loads(calls[0].content)["messages"][1]["content"])
-    assert model_input["previous"] == expected.summary_view()
-    assert all(set(fact) == {"id", "section", "kind", "text"} for fact in model_input["previous"]["facts"])
+    assert model_input["previous"] == json.loads(build_selection_plan(
+        SummarizeContextRequest(previous=expected, messages=request.messages),
+    ).payload)["previous"]
+    assert all(set(fact) == {"id", "section", "kind", "text", "speaker"} for fact in model_input["previous"]["facts"])
 
 
 @pytest.mark.parametrize("invalid", [
@@ -610,6 +664,157 @@ def test_unknown_error_text_is_never_used_as_public_reason(monkeypatch: pytest.M
     response = TestClient(app_module.app).post("/summarize_context", json=_request().model_dump())
     assert response.status_code == 502
     assert "invalid_output" in response.text and "PRIVATE" not in response.text
+
+
+@pytest.mark.parametrize("quote,age_check", [
+    ("Are you 23?", "question_mark"),
+    ("I'm 23. Just kidding.", "uncertainty_or_retraction"),
+    ("23", "unsupported_declaration_form"),
+    ("I'm 23 or 24.", "additional_numeric_claim"),
+    ("I'm 23 months old.", "unsupported_age_continuation"),
+])
+def test_age_failure_logs_actual_operation_and_rule_without_quote(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, quote: str, age_check: str,
+) -> None:
+    operations = [
+        _operation("I design gardens.", kind="specialty", message_id="PRIVATE_WORK_ID"),
+        _operation(quote, kind="age", message_id="PRIVATE_AGE_ID"),
+    ]
+    summarizer, calls = _stub_summary(monkeypatch, MemoryDelta(operations=operations).model_dump_json())
+    monkeypatch.setattr(app_module, "_summarizer", summarizer)
+    monkeypatch.setattr(summary_module.log, "propagate", True)
+    caplog.set_level(logging.INFO, logger=summary_module.log.name)
+    previous = _previous_memory()
+    original = previous.model_dump_json()
+    response = TestClient(app_module.app).post("/summarize_context", json={
+        "previous": previous.model_dump(),
+        "messages": [
+            {"sender_type": "other", "text": "I design gardens.", "raw_id": "PRIVATE_WORK_ID"},
+            {"sender_type": "me", "text": "PRIVATE_UNRELATED_TEXT", "raw_id": "PRIVATE_OTHER_ID"},
+            {"sender_type": "other", "text": quote, "raw_id": "PRIVATE_AGE_ID"},
+        ],
+    })
+    assert response.status_code == 502 and "age_declaration_invalid" in response.text
+    diagnostic = next(record.getMessage() for record in caplog.records if "summary validation detail:" in record.getMessage())
+    for field in (
+        "component=operation", "operation_index=1", "action=add", "section=interlocutor",
+        "kind=age", "source_positions=[2]", "source_speakers=['other']", "source_match=exact",
+        f"age_check={age_check}", f"quote_chars={len(quote)}",
+    ):
+        assert field in diagnostic
+    assert "PRIVATE_" not in caplog.text + response.text
+    # Actual age values must never be logged, even when the proposal is just a number.
+    assert "quote=" not in diagnostic and "I design gardens." not in caplog.text
+    if len(quote) > 2:
+        assert quote not in caplog.text + response.text
+    assert previous.model_dump_json() == original and len(calls) == 1
+    assert all(record.exc_info is None for record in caplog.records)
+    ids = re.findall(r"summary_id=([a-f0-9]{32})\b", caplog.text)
+    assert len(ids) >= 4 and len(set(ids)) == 1
+
+
+@pytest.mark.parametrize("content", ["{}", "not JSON"])
+def test_summary_ids_correlate_success_or_output_failure_and_change_per_call(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, content: str,
+) -> None:
+    summarizer, _ = _stub_summary(monkeypatch, content)
+    monkeypatch.setattr(app_module, "_summarizer", summarizer)
+    monkeypatch.setattr(summary_module.log, "propagate", True)
+    caplog.set_level(logging.INFO, logger=summary_module.log.name)
+    client = TestClient(app_module.app)
+    seen: list[str] = []
+    for _ in range(2):
+        caplog.clear()
+        client.post("/summarize_context", json=_request().model_dump())
+        ids = re.findall(r"summary_id=([a-f0-9]{32})\b", caplog.text)
+        assert len(ids) >= 2 and len(set(ids)) == 1
+        assert "elapsed_ms=" in caplog.text
+        seen.append(ids[0])
+    assert seen[0] != seen[1]
+
+
+@pytest.mark.parametrize("failure,reason,match", [
+    ("mismatched-quote", "citation_quote_mismatch", "no_match"),
+    ("missing-message", "citation_message_missing", "missing_message"),
+    ("ambiguous-quote", "citation_quote_ambiguous", "ambiguous_formatting"),
+    ("recovered-question", "age_declaration_invalid", "formatting_only"),
+    ("oversized-source", "memory_validation_or_capacity", "formatting_only"),
+    ("relationship", "citation_quote_mismatch", "no_match"),
+])
+def test_failure_details_distinguish_citation_recovery_and_relationships(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    failure: str, reason: str, match: str,
+) -> None:
+    source_id = "PRIVATE_SOURCE_ID"
+    source = "PRIVATE_ORIGINAL_TEXT"
+    operation = _operation("PRIVATE_PROPOSED_TEXT", message_id=source_id)
+    if failure == "missing-message":
+        operation.message_id = "PRIVATE_MISSING_ID"
+    elif failure == "ambiguous-quote":
+        source = "PRIVATE\tTEXT. PRIVATE  TEXT."
+        operation.quote = "PRIVATE TEXT."
+    elif failure == "recovered-question":
+        source = "I’m 23?"
+        operation.quote, operation.kind = "I'm 23?", "age"
+    elif failure == "oversized-source":
+        source = "PRIVATE" + " " * 210 + "TEXT."
+        operation.quote = "PRIVATE TEXT."
+    delta = MemoryDelta(operations=[operation])
+    if failure == "relationship":
+        delta = MemoryDelta(relationship=RelationshipChange(
+            stage="familiar", message_id=source_id, quote=operation.quote,
+        ))
+    summarizer, calls = _stub_summary(monkeypatch, delta.model_dump_json())
+    monkeypatch.setattr(app_module, "_summarizer", summarizer)
+    monkeypatch.setattr(summary_module.log, "propagate", True)
+    monkeypatch.setattr(reply_module, "LOG_PROMPTS", True)
+    caplog.set_level(logging.DEBUG, logger=summary_module.log.name)
+    response = TestClient(app_module.app).post("/summarize_context", json={
+        "messages": [{"sender_type": "other", "raw_id": source_id, "text": source}],
+    })
+    assert response.status_code == 502 and reason in response.text
+    details = next(record.getMessage() for record in caplog.records if "summary validation detail:" in record.getMessage())
+    assert f"source_match={match}" in details
+    assert f"quote_chars={len(operation.quote)}" in details
+    if failure == "relationship":
+        assert "component=relationship operation_index=None" in details
+        assert "target_state=not_applicable" in details
+    else:
+        assert "component=operation operation_index=0" in details
+    if failure == "recovered-question":
+        assert "age_check=question_mark" in details
+    assert "PRIVATE" not in caplog.text + response.text
+    assert source not in caplog.text and operation.quote not in caplog.text
+    assert len(calls) == 1
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+def test_registry_capacity_failure_does_not_blame_an_unrelated_operation(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    previous = MemoryContent(facts=[
+        MemoryFact(id=f"PRIVATE_ID_{index}", section="agent", kind="story", text=f"PRIVATE_FACT_{index}")
+        for index in range(MAX_MEMORY_FACTS)
+    ])
+    summarizer, _ = _stub_summary(monkeypatch, MemoryDelta(operations=[_operation()]).model_dump_json())
+    monkeypatch.setattr(summary_module.log, "propagate", True)
+    caplog.set_level(logging.INFO, logger=summary_module.log.name)
+    with pytest.raises(ContextSummaryError):
+        summarizer.summarize(_request(previous))
+    details = next(record.getMessage() for record in caplog.records if "summary validation detail:" in record.getMessage())
+    assert "component=merge" in details and "operation_index" not in details
+    assert "PRIVATE" not in caplog.text
+
+
+def test_summary_id_rejects_arbitrary_error_labels(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(request: SummarizeContextRequest) -> SummarizeContextResponse:
+        raise ContextSummaryError("PRIVATE_ERROR", summary_id="PRIVATE_ID\nforged log entry")
+
+    monkeypatch.setattr(app_module._summarizer, "summarize", fail)
+    response = TestClient(app_module.app).post("/summarize_context", json=_request().model_dump())
+    assert response.status_code == 502
+    error = ContextSummaryError("PRIVATE_ERROR", summary_id="PRIVATE_ID")
+    assert error.summary_id is None
 
 
 @pytest.mark.parametrize("content", [
@@ -736,7 +941,7 @@ def test_inference_request_boundary_includes_projected_metadata(
     assert len(request.model_dump_json().encode("utf-8")) < MAX_SUMMARY_WIRE_BYTES
     client = TestClient(app_module.app)
     assert client.post("/summarize_context", json=request.model_dump(mode="json")).status_code == 200
-    assert json.loads(calls[0].content)["messages"][1]["content"] == request.inference_payload()
+    assert json.loads(calls[0].content)["messages"][1]["content"] == build_selection_plan(request).payload
     request.messages[0].text += "x"
     assert client.post("/summarize_context", json=request.model_dump(mode="json")).status_code == 422
     assert len(calls) == 1
@@ -767,9 +972,9 @@ def test_wire_can_exceed_inference_budget_without_sending_duplicate_proofs(
     assert SummarizeContextResponse.model_validate(response.json()).memory == previous
     assert len(calls) == 1
     model_input = json.loads(calls[0].content)["messages"][1]["content"]
-    assert model_input == request.inference_payload()
+    assert model_input == build_selection_plan(request).payload
     assert "SOURCE_PROOF_" not in model_input
-    assert json.loads(model_input)["previous"] == previous.summary_view()
+    assert json.loads(model_input)["previous"] == json.loads(build_selection_plan(request).payload)["previous"]
 
 
 def test_legacy_migration_rechecks_inference_budget_before_model_call(
@@ -823,7 +1028,7 @@ def test_summary_logs_metadata_only_even_with_prompt_logging(
     assert "memory_chars=" in caplog.text
     assert "operations=1 facts=2" in caplog.text
     prepared = SummarizeContextRequest(previous=migrate_legacy(memory), messages=request.messages)
-    assert f"input_bytes={len(prepared.inference_payload().encode('utf-8'))}" in caplog.text
+    assert f"input_bytes={len(build_selection_plan(prepared).payload.encode('utf-8'))}" in caplog.text
     assert private not in caplog.text
     assert proof_id not in caplog.text
     assert all(fact.id not in caplog.text for fact in result.memory.facts)

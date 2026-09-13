@@ -158,7 +158,48 @@ resolved open-thread questions/commitments; profile facts cannot be silently
 deleted. Omitted facts are preserved. Repeated normalized quotes are deduplicated
 without rewriting their original provenance; semantic paraphrase deduplication is
 not guaranteed. When no previous facts exist, constrained decoding allows only
-additions. Later targets are constrained to existing IDs.
+additions. Later replacements/removals require compatible existing targets.
+
+### Source-excerpt selection (internal extraction)
+
+The summarizer now asks the model to **select evidence**, not copy it. Code splits
+the current messages into exact bounded excerpts, labelled `s0`, `s1`, etc.; all
+original message text stays visible in chronological order as context. Excerpts
+are limited to 200 characters and never joined across messages. Missing source
+IDs, service events and oversized indivisible tokens are visible context but
+cannot supply selectable proof. Some supported age declarations additionally get
+a shorter, verbatim age-only excerpt. This is not semantic age inference.
+
+The model can emit only:
+- `add`: `source_id`, `scope` (`profile`, `interaction`, `open_threads`) and `kind`.
+  For `profile`, **code derives agent/interlocutor ownership from the source**.
+- `replace`: `source_id`, `kind` and a required target alias (`t0`, `t1`, etc.).
+  Decoding permits only combinations compatible with the prior fact's section,
+  kind, speaker and evidence-freshness rules. Legacy unverified `other` records
+  may gain a concrete kind, as before.
+- `remove`: `source_id` and a required target alias for an open question/commitment.
+- Optional relationship change: `stage` and `source_id`.
+
+Quotes, original message IDs, speakers and profile sections are **not output
+fields**. The resolver supplies them from the selected source. Targets are
+mandatory for replace/remove; null targets and unknown choices are rejected.
+Age selections are restricted to excerpts accepted by the existing syntax
+validator, so a standalone retraction cannot be selected as a replacement age.
+Model-decoding constraints are checked again locally, then the existing atomic
+merger independently validates all operations. Old free-quote model output is
+not accepted as a fallback, and no extra inference retries are added.
+
+This is an **API-internal redesign**: the HTTP contract, persisted fact/evidence
+shape, model selection and reader checkpoint policy remain unchanged. Existing
+contexts are not rebuilt or rewritten automatically. Restart the model API;
+start logs will include `extraction=source_selection` and `excerpts`.
+
+**Remaining limitations:** selecting a genuine excerpt does not prove its
+meaning. The model must still distinguish a self-report from a statement about
+someone else, choose a corrected age rather than a retracted earlier one, decide
+whether a thread was resolved, and extract every relevant detail. Full nearby
+context is retained for those decisions. Excerpt selection reduces transcription
+and ownership errors; it does not make a 7B model a reliable semantic fact checker.
 
 The four old lists (`interlocutor`, `agent`, `interaction`, `open_threads`) remain
 bounded **previews**: up to 8 strings of 200 characters per section, 6,000 serialized
@@ -200,16 +241,32 @@ from the original messages, not another update of the lossy memory.
 
 The evaluations separate **retention** (seeded, source-verified facts survive an
 unrelated real-model update) from **extraction completeness** (all useful details
-must be found in new messages). The first passed with local Qwen2.5:7b; the second
-still exposed missing job/specialty details. Evidence validation rejects fabricated
+must be found in new messages). Before source selection, the first passed with
+local Qwen2.5:7b; the second exposed missing job/specialty details. Evidence validation rejects fabricated
 quotes and wrong-speaker profile entries but cannot prove every fact was found or
 that the model selected the correct fact to replace. The strict completeness test
 is left enabled within the opt-in suite; it is not weakened to conceal omissions.
 
+After the source-selection redesign, a short real-Qwen smoke check extracted both
+speakers' ages/jobs plus a work specialty and correctly replaced only one age in a
+later update. The unchanged, more demanding live suite returned **1 passed,
+1 failed**: seeded-fact retention passed; initial extraction still omitted the
+garden specialty and kayaking detail in the multi-clause/retraction conversation.
+That failure occurs before its later-update assertions, so those later steps
+were not verified by that run. Successful decoding or a 200 response must not be
+presented as proof of complete extraction or production-history reliability.
+
 Wire requests may contain up to **64,000 UTF-8 bytes** including stored proofs.
 The **12,000-byte** limit applies separately to `inference_payload()`: compact
 previous fact IDs/text plus the current messages, without duplicate previews or
-proofs. Reader batching validates both budgets. Legacy migration adds target IDs,
+proofs. This shared method is a budgeting projection, not the new model prompt.
+Reader batching validates both budgets. The API additionally bounds the actual
+selection input at **12,000 UTF-8 bytes**, the source registry at **256 excerpts**,
+and the decoding schema at **256,000 bytes**. Exceeding any internal limit returns
+`selection_input_capacity` before inference; excerpts are never silently evicted.
+The reader does not currently shrink/retry batches automatically for this extra
+overhead; `RESPONSER_CONTEXT_BATCH_SIZE` can be reduced if this limit is reached.
+Legacy migration adds target IDs,
 so a near-limit legacy request can be rejected after migration rather than silently
 truncated. Schema/prompt tokens are additional; byte caps are not exact tokenizer
 limits. Defaults use a 2,048-token completion in an 8,192-token model window.
@@ -257,6 +314,8 @@ messages are treated as untrusted evidence; summaries never receive a reply pers
 | `RESPONSER_LOG_LEVEL`        | `INFO`                   | Log level (DEBUG, INFO, WARNING, ...)     |
 | `RESPONSER_LOG_FILE`         | `logs/model_api.log`     | Log file path (empty string disables it)  |
 | `RESPONSER_LOG_PROMPTS`      | `false`                  | DEBUG-log reply prompts/output; context-bearing system prompts are redacted |
+| `RESPONSER_CONTEXT_TRACE`    | `false`                  | Explicit opt-in full private summary trace, independent of DEBUG/reply logging |
+| `RESPONSER_CONTEXT_TRACE_DIR` | project `diagnostics/context` | One owner-only JSONL trace per summary call; not ordinary logs |
 
 > Model inference parameters (model, temperature, top-p, max tokens) are an
 > internal concern of this service and are **not** part of the HTTP contract; the
@@ -282,11 +341,87 @@ RESPONSER_LOG_LEVEL=DEBUG RESPONSER_LOG_PROMPTS=true \
 - **DEBUG** with `RESPONSER_LOG_PROMPTS=true` additionally logs the full assembled
   reply prompt and raw model output, except that system prompts containing
   persisted context are redacted.
-- Summarization logs **metadata only**: model, message count, input size, timing,
+- Ordinary summarization logs contain **metadata only**: model, message count, input size, timing,
   token counts, and memory size; failures record exception types and allowlisted
-  reason codes, never arbitrary exception text. It
-  never logs raw memory, summary prompts/output, or error tracebacks, even when
-  reply prompt logging is enabled.
+  reason codes, never arbitrary exception text. Raw memory, summary prompts/output
+  and error tracebacks never enter these handlers. Full tracing below uses a
+  separate, explicitly opted-in file sink, even when reply prompt logging is on.
+
+### Full private context trace mode
+
+Use this when a summary succeeds but contains wrong classifications, omitted
+facts, or an empty profile. The trace exposes decisions; it does **not** fix or
+certify semantic quality.
+
+**Warning:** traces contain unredacted chat text, previous memory, message IDs,
+exact prompts, selected/unselected excerpts and model output. Secrets present
+in that data can also be captured. Keep traces local; review and redact before
+sharing, and disable the mode after investigation.
+
+Start the API with `RESPONSER_CONTEXT_TRACE=true`, retaining your other settings:
+
+```bash
+RESPONSER_CONTEXT_TRACE=true RESPONSER_MODEL=nous-hermes2 \
+  RESPONSER_PERSONALITY=mia RESPONSER_TEMPERATURE=0.6 \
+  .venv/bin/python -m uvicorn responser_model_api.app:app --port 8000
+```
+
+Settings are read at startup. DEBUG, `RESPONSER_LOG_PROMPTS` and HTTP callers
+cannot enable tracing. `RESPONSER_LOG_FILE=''` disables ordinary file logging,
+not an explicitly enabled private trace.
+
+Each summary call creates `diagnostics/context/summary-<summary_id>.jsonl` under
+this project, independent of the default working directory. Override it with
+`RESPONSER_CONTEXT_TRACE_DIR` (relative overrides use the process working
+directory). Match `summary_id` to console logs. Separate batches/attempts have
+separate files; existing files are never overwritten.
+
+Each JSONL line has a sequence number, UTC timestamp, elapsed time, stage and
+data. Events are flushed and fsynced immediately:
+
+| Stage | Captured data |
+|-------|---------------|
+| `request_received` | Incoming messages, full previous memory and model settings |
+| `previous_prepared` | Previous memory after legacy migration |
+| `selection_plan` | Excerpts with proofs/age eligibility, target aliases, compatible changes |
+| `inference_request` | Exact prompt messages, schema, model and options |
+| `inference_response` | SDK-decoded response, including raw completion text; not transport headers |
+| `selection_parsed` | Model selections and unselected excerpts in plain text |
+| `resolved_delta` | Quotes, speakers, sections and kinds supplied to the merger |
+| `merge_started` / `merge_result` | Merge boundary and full resulting memory |
+| `review` | All facts grouped as kind/text, empty sections, added/removed/preserved/modified IDs |
+| `response` / `completed` | Returned response data and completion of the summary pipeline |
+| `failed` | Error type and safe reason where available; no exception text/tracebacks |
+
+Rejections also record `selection_schema_rejected` or `merge_rejected` details
+where applicable. Raw invalid completion text stays in `inference_response`.
+Unselected text may be irrelevant or omitted; the trace does not judge which.
+The complete `review` is not limited to eight preview items, and explicitly says
+`semantic_correctness_and_completeness=NOT_VALIDATED`.
+
+For empty `interlocutor`, start with `review`, then compare `selection_parsed`
+and `resolved_delta`: were the other speaker's excerpts omitted, put under
+`interaction`, or used to replace an earlier fact? The request/prepared stages
+show whether a bad fact already existed before this call.
+
+**Storage:** macOS/Linux directories must be owned by the running user with no
+group/other access (`0700` when created); files are `0600`. Symlink destinations
+are refused. `diagnostics/` and `summary-*.jsonl` are gitignored. Each file is
+capped at **4 MiB**. Permission/disk/size errors abort the summary with
+`trace_write_failed`; earlier events remain. A hard exit or disk error may leave
+no terminal event or an incomplete final line—ignore that line when inspecting.
+There is no automatic deletion or global retention cap; monitor disk space.
+
+`completed` is **not** proof of reader checkpoint persistence or message sending.
+Browser scraping, reader persistence and reply sending remain outside this
+trace. FastAPI 422s before the summarizer produce no trace; network/SDK failures
+may leave `inference_request` followed by `failed`, without a response stage.
+
+Enabling tracing does not rebuild saved context or reconstruct past runs. With
+an existing checkpoint, the reader normally submits only the unsummarized tail.
+A full-history diagnostic rebuild requires a separate explicit operation.
+Prefer reader `dry_run` while testing: it prevents sending, but can still save
+context after a valid summary. Tracing itself never edits reader context files.
 
 ### Diagnosing context-generation 502 responses
 
@@ -296,9 +431,20 @@ the API or Ollama was unreachable. Context errors now expose an allowlisted
 
 - `output_truncated`: the completion was cut off or incomplete.
 - `delta_schema_invalid` / `output_empty`: unusable model JSON or no text.
+- `selection_source_unknown` / `selection_target_unknown`: an output ID was not
+  in the request-local excerpt/target registry.
+- `selection_choice_invalid`: a source/target/kind combination violated the
+  locally checked selection rules (even if the model server ignored its grammar).
+- `selection_input_capacity`: excerpt count, actual prompt bytes or decoding
+  schema size exceeded an internal bound before inference.
+- `trace_write_failed`: explicitly enabled private tracing could not safely
+  create or persist its file. Check the trace directory permissions/disk space;
+  do not expect complete diagnostic output after this failure.
 - `citation_message_missing`: the proposed source ID was not in the current batch.
-- `citation_quote_mismatch`: the model's quote was not a verbatim substring of
-  the message it cited.
+- `citation_quote_mismatch`: the quote did not match its cited message exactly
+  and could not be recovered through the formatting-only rules below.
+- `citation_quote_ambiguous`: formatting recovery matched multiple distinct
+  original source spans; the API refuses to guess which quote was intended.
 - `profile_speaker_mismatch`: a quote was assigned to the wrong participant.
 - `age_declaration_invalid`: the age quote is not a supported unambiguous
   declaration (for example a question, retracted joke, or conflicting numbers).
@@ -318,11 +464,76 @@ after all batches succeed: a failed second batch leaves no new saved context on
 initial creation, so the next cycle starts again from batch one. Restart the model
 API after updating code to see the detailed reason codes.
 
+Rejected deltas now also emit a `summary validation detail` warning at the default
+log level. It reports the **first actual failure** without retrying, skipping an
+operation, or dumping the model output:
+
+- `summary_id`: a fresh server-generated ID linking the start, success or
+  validation rejection, and API validation-error logs for one summary call. It
+  is not a chat identifier or a batch number.
+- `component`: `operation`, `relationship`, or `merge` for registry-wide failures.
+- `operation_index`: **zero-based** operation position (`None` for relationship).
+- `action`, `section`, `kind`, `target_state`: validated enum labels, never fact IDs.
+- `source_positions`: **zero-based** positions of messages matching the cited ID
+  in this request; multiple positions can represent fragments. `source_speakers`
+  lists those rows' `me`/`other`/`system` labels, not account names.
+- `source_match`: `missing_message`, `no_match`, `exact`, `formatting_only`, or
+  `ambiguous_formatting`; exact provenance is not proof of correct meaning.
+- `quote_chars`: proposed quote length, not its content.
+- `age_check`: the specific existing age rule that rejected the verified source
+  quote: `question_mark`, `uncertainty_or_retraction`,
+  `unsupported_declaration_form`, `additional_numeric_claim`, or
+  `unsupported_age_continuation`. Other failures use `not_applicable`.
+
+For example, `kind=age source_match=exact age_check=unsupported_declaration_form`
+means the quote exists but its syntax is unsupported, whereas
+`source_match=no_match age_check=not_applicable` means source validation failed
+before any age check. These are validator rules, not semantic diagnoses. Age
+acceptance rules are unchanged by this logging update.
+
+Start logs include previous fact count and configured token/context budgets;
+rejection logs include elapsed time. No chat text, actual ages, source/fact IDs,
+raw model output or tracebacks are added, even with DEBUG or reply prompt logging
+enabled. These guarantees apply to ordinary logs; explicitly opted-in private
+trace files intentionally include full content. No new environment setting is
+needed for metadata diagnostics; restart the API to apply code changes. Old
+failures cannot be reconstructed retroactively from ordinary logs.
+
+The independent merger retains citation recovery for direct delta callers and
+defense-in-depth tests; normal source-selection output already uses original
+source text and does not require this repair. Recovery first checks the exact
+substring. If that fails, it allows only
+whitespace collapsing and curly/straight single or double quotation marks, within
+the **same cited message ID**. A unique match restores the original source span,
+including its original punctuation and whitespace, into the fact and evidence.
+It never stores the model's reformatted version, joins fragments, searches other
+message IDs, changes case/words/numbers, or uses fuzzy similarity. Multiple distinct
+spans, ambiguous speakers, oversized restored quotes and unsupported mismatches
+still fail the entire update. Restored spans cannot cut through words or numeric
+tokens. Existing attribution, age, freshness and capacity checks still apply.
+Recovery uses no additional inference call and logs only a metadata event;
+it does not mean the batch has committed. A later invalid operation still aborts
+everything. Source matching remains provenance validation, not semantic proof or
+a guarantee that the model extracted every relevant fact.
+
 > Privacy: prompts contain private chat content, so prompt logging is **off by
 > default** and must be explicitly enabled. Ordinary reply text is still logged
 > at INFO and may itself refer to private facts; protect and rotate those logs.
 
 ## Test
+
+`tests/test_summary_trace.py` uses synthetic data and mocked Ollama transport to
+test phase coverage, faithful wrong-classification traces, disabled-mode privacy,
+no trace leakage into ordinary logs, file permissions, concurrency and I/O errors.
+The test fixtures disable tracing during collection and use temporary trace paths
+so a developer's environment cannot write private traces during ordinary pytest.
+
+`tests/test_source_selection.py` exercises the real selection parser/resolver and
+HTTP endpoint with only Ollama transport stubbed. `tests/test_context_summarizer.py`
+also keeps historical malformed-delta tests through an explicitly named
+post-selection test seam: these verify independent merger defenses, not real
+model extraction. JSON-schema compatibility is checked with the dev-only
+`jsonschema` dependency. The unchanged opt-in live tests check semantic quality.
 
 ```bash
 pytest

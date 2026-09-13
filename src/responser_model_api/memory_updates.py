@@ -1,4 +1,4 @@
-"""Pure, fail-closed merging of evidence-backed memory deltas.
+"""Deterministic, fail-closed merging of evidence-backed memory deltas.
 
 Source matching proves only that a quote was supplied by that speaker, not its
 truth, semantic classification, resolution of a thread, or extraction completeness.
@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import unicodedata
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -27,7 +31,11 @@ from responser_model_api.schemas import (
     NonEmptyString,
     RelationshipStage,
     RelationshipState,
+    SenderType,
 )
+from .source_quotes import formatting_equivalent_spans
+
+log = logging.getLogger("responser.model_api")
 
 MAX_MEMORY_OPERATIONS = 40
 MAX_PREVIEW_ITEMS = 8
@@ -55,8 +63,14 @@ _AGE_UNCERTAINTY = re.compile(
 )
 
 
-def _is_age_declaration(quote: str) -> bool:
-    """Accept a literal self-declaration with ordinary trailing chat text.
+AgeCheck = Literal[
+    "question_mark", "uncertainty_or_retraction", "unsupported_declaration_form",
+    "additional_numeric_claim", "unsupported_age_continuation",
+]
+
+
+def _age_declaration_issue(quote: str) -> AgeCheck | None:
+    """Return the rejecting rule, not source text or an inferred age.
 
     Do not truncate/repair evidence to make a quote pass. Questions, explicit
     uncertainty/retractions and multiple numbers remain conservatively rejected
@@ -64,24 +78,31 @@ def _is_age_declaration(quote: str) -> bool:
     quoted as a shorter declaration by the extractor, not guessed here.
     """
     text = quote.strip()
-    if "?" in text or _AGE_UNCERTAINTY.search(text):
-        return False
+    if "?" in text:
+        return "question_mark"
+    if _AGE_UNCERTAINTY.search(text):
+        return "uncertainty_or_retraction"
     if _AGE_DECLARATION.fullmatch(text):
-        return True
+        return None
     head = _AGE_SENTENCE_START.match(text)
     if head is None:
-        return False
+        return "unsupported_declaration_form"
     tail = text[head.end():].strip()
     tail = _AGE_CORRECTION_TAIL.sub("", tail, count=1).strip()
     if any(char.isdigit() for char in tail):
         # Prevent accepting an age range or two conflicting age assertions.
-        return False
+        return "additional_numeric_claim"
     if not tail or all(unicodedata.category(char)[0] in "PSMZ" for char in tail):
         # Terminal punctuation and emoji do not invalidate the declaration.
-        return True
+        return None
     # A word directly after the number may be a unit (months, dollars, plants)
     # rather than an age. Only allow an explicit clause boundary/connector.
-    return _AGE_CONTINUATION.match(tail) is not None
+    return None if _AGE_CONTINUATION.match(tail) is not None else "unsupported_age_continuation"
+
+
+def _is_age_declaration(quote: str) -> bool:
+    """Check the same conservative age rules used by rejection diagnostics."""
+    return _age_declaration_issue(quote) is None
 
 
 # Allowlisted codes, not exception text, may be logged or returned over HTTP.
@@ -91,6 +112,7 @@ MEMORY_FAILURE_REASONS: dict[str, str] = {
     "legacy memory violates validation or capacity limits": "legacy_validation_or_capacity",
     "citation message ID is not in the supplied batch": "citation_message_missing",
     "citation quote must exactly match the supplied message": "citation_quote_mismatch",
+    "citation formatting matches multiple distinct source quotes": "citation_quote_ambiguous",
     "citation has ambiguous source speakers": "citation_speaker_ambiguous",
     "service events cannot provide fact evidence": "citation_service_event",
     "profile section does not match source speaker": "profile_speaker_mismatch",
@@ -110,8 +132,29 @@ MEMORY_FAILURE_REASONS: dict[str, str] = {
 }
 
 
+@dataclass(frozen=True)
+class UpdateDiagnostics:
+    """Metadata from validated fields only; never hold free text or source IDs."""
+
+    component: Literal["operation", "relationship"]
+    operation_index: int | None
+    action: Literal["add", "replace", "remove"] | None
+    section: FactSection | None
+    kind: FactKind | None
+    source_positions: tuple[int, ...]
+    source_speakers: tuple[SenderType, ...]
+    source_match: Literal["missing_message", "exact", "formatting_only", "ambiguous_formatting", "no_match"]
+    quote_chars: int
+    target_state: Literal["none", "present", "missing", "not_applicable"]
+
+
 class MemoryUpdateError(ValueError):
     """An invalid delta; safe reason codes never expose its private source text."""
+
+    def __init__(self, message: str, *, age_check: AgeCheck | None = None) -> None:
+        super().__init__(message)
+        self.age_check = age_check
+        self.diagnostics: UpdateDiagnostics | None = None
 
     @property
     def reason(self) -> str:
@@ -152,6 +195,60 @@ class MemoryDelta(BaseModel):
     relationship: RelationshipChange | None = None
 
 
+def _update_diagnostics(
+    change: MemoryOperation | RelationshipChange, operation_index: int | None,
+    messages: list[Message], memory: MemoryContent,
+) -> UpdateDiagnostics:
+    """Locate failed evidence without printing private message/fact identifiers."""
+    positions = tuple(index for index, message in enumerate(messages) if message.raw_id == change.message_id)
+    sources = [messages[index] for index in positions]
+    source_match: Literal["missing_message", "exact", "formatting_only", "ambiguous_formatting", "no_match"]
+    if not sources:
+        source_match = "missing_message"
+    elif any(change.quote in source.text for source in sources):
+        source_match = "exact"
+    else:
+        candidates = {
+            (source.sender_type, span)
+            for source in sources for span in formatting_equivalent_spans(source.text, change.quote)
+        }
+        source_match = "no_match" if not candidates else "formatting_only" if len(candidates) == 1 else "ambiguous_formatting"
+    operation = change if isinstance(change, MemoryOperation) else None
+    target_state: Literal["none", "present", "missing", "not_applicable"] = "not_applicable"
+    if operation is not None:
+        if operation.target_id is None:
+            target_state = "none"
+        else:
+            target_state = "present" if any(fact.id == operation.target_id for fact in memory.facts) else "missing"
+    return UpdateDiagnostics(
+        component="operation" if operation is not None else "relationship",
+        operation_index=operation_index,
+        action=operation.action if operation is not None else None,
+        section=operation.section if operation is not None else None,
+        kind=operation.kind if operation is not None else None,
+        source_positions=positions,
+        source_speakers=tuple(sorted({source.sender_type for source in sources})),
+        source_match=source_match, quote_chars=len(change.quote), target_state=target_state,
+    )
+
+
+@contextmanager
+def _diagnose_change(
+    change: MemoryOperation | RelationshipChange, operation_index: int | None,
+    messages: list[Message], memory: MemoryContent,
+) -> Iterator[None]:
+    """Attach metadata at the actual failure; never rerun/skip failed operations."""
+    try:
+        yield
+    except MemoryUpdateError as exc:
+        exc.diagnostics = _update_diagnostics(change, operation_index, messages, memory)
+        raise
+    except ValidationError as exc:
+        error = MemoryUpdateError("memory update violates validation or capacity limits")
+        error.diagnostics = _update_diagnostics(change, operation_index, messages, memory)
+        raise error from exc
+
+
 def _normalized_quote(quote: str) -> str:
     """Normalize identity only; stored text and proof remain byte-for-byte exact."""
     return " ".join(unicodedata.normalize("NFKC", quote).split()).casefold()
@@ -184,13 +281,30 @@ def migrate_legacy(memory: MemoryContent) -> MemoryContent:
 
 
 def _source(message_id: str, quote: str, messages: list[Message]) -> FactEvidence:
-    """Repeated-ID fragments are permitted only when quote attribution is unique."""
+    """Validate exact evidence, recovering only unique formatting-equivalent spans."""
     sources = [message for message in messages if message.raw_id == message_id]
     if not sources:
         raise MemoryUpdateError("citation message ID is not in the supplied batch")
     matches = [message for message in sources if quote in message.text]
     if not matches:
-        raise MemoryUpdateError("citation quote must exactly match the supplied message")
+        candidates = {
+            (message.sender_type, span)
+            for message in sources
+            for span in formatting_equivalent_spans(message.text, quote)
+        }
+        if not candidates:
+            raise MemoryUpdateError("citation quote must exactly match the supplied message")
+        if len({speaker for speaker, _ in candidates}) != 1:
+            raise MemoryUpdateError("citation has ambiguous source speakers")
+        if len(candidates) != 1:
+            raise MemoryUpdateError("citation formatting matches multiple distinct source quotes")
+        speaker, original = next(iter(candidates))
+        if speaker == "system":
+            raise MemoryUpdateError("service events cannot provide fact evidence")
+        evidence = FactEvidence(message_id=message_id, sender_type=speaker, quote=original)
+        # No quote, source ID or other private data in recovery diagnostics.
+        log.info("citation formatting recovered: original source span restored")
+        return evidence
     speakers = {message.sender_type for message in matches}
     if len(speakers) != 1:
         raise MemoryUpdateError("citation has ambiguous source speakers")
@@ -258,47 +372,52 @@ def _merge(
 
     # Validate the entire plan against the original registry before applying it.
     # New facts cannot become targets during the same batch.
-    for operation in delta.operations:
-        if operation.action == "add":
+    for index, operation in enumerate(delta.operations):
+        with _diagnose_change(operation, index, messages, memory):
+            if operation.action == "add":
+                if operation.target_id is not None:
+                    raise MemoryUpdateError("add must not have a target ID")
+            else:
+                if not operation.target_id or operation.target_id not in targets:
+                    raise MemoryUpdateError("replace/remove requires an existing target ID")
+                if operation.target_id in touched:
+                    raise MemoryUpdateError("repeated target ID conflicts within one delta")
+                touched.add(operation.target_id)
+            evidence = _source(operation.message_id, operation.quote, messages)
+            _check_attribution(operation.section, evidence)
+            age_check = _age_declaration_issue(evidence.quote) if operation.kind == "age" else None
+            if age_check is not None:
+                raise MemoryUpdateError(
+                    "age quote must contain an unambiguous age declaration, not a question", age_check=age_check,
+                )
             if operation.target_id is not None:
-                raise MemoryUpdateError("add must not have a target ID")
-        else:
-            if not operation.target_id or operation.target_id not in targets:
-                raise MemoryUpdateError("replace/remove requires an existing target ID")
-            if operation.target_id in touched:
-                raise MemoryUpdateError("repeated target ID conflicts within one delta")
-            touched.add(operation.target_id)
-        evidence = _source(operation.message_id, operation.quote, messages)
-        _check_attribution(operation.section, evidence)
-        if operation.kind == "age" and not _is_age_declaration(operation.quote):
-            raise MemoryUpdateError("age quote must contain an unambiguous age declaration, not a question")
-        if operation.target_id is not None:
-            _check_target(operation, evidence, targets[operation.target_id], memory.facts)
-        if operation.action == "remove":
-            assert operation.target_id is not None
-            removals.add(operation.target_id)
-            continue
-        fact = MemoryFact(
-            id=_fact_id(operation.section, evidence.sender_type, evidence.quote),
-            section=operation.section, kind=operation.kind, text=evidence.quote, evidence=evidence,
-        )
-        if operation.action == "replace":
-            assert operation.target_id is not None
-            replacements[operation.target_id] = fact
-        else:
-            additions.append(fact)
+                _check_target(operation, evidence, targets[operation.target_id], memory.facts)
+            if operation.action == "remove":
+                assert operation.target_id is not None
+                removals.add(operation.target_id)
+                continue
+            fact = MemoryFact(
+                id=_fact_id(operation.section, evidence.sender_type, evidence.quote),
+                section=operation.section, kind=operation.kind, text=evidence.quote, evidence=evidence,
+            )
+            if operation.action == "replace":
+                assert operation.target_id is not None
+                replacements[operation.target_id] = fact
+            else:
+                additions.append(fact)
 
     relationship = memory.relationship
     relationship_source = memory.relationship_source
     if delta.relationship is not None:
         change = delta.relationship
-        source = _source(change.message_id, change.quote, messages)
-        # A repeated rapport observation preserves its original provenance.
-        if change.stage != relationship.stage or _normalized_quote(change.quote) != _normalized_quote(relationship.evidence):
-            if relationship_source is not None and _same_source(relationship_source, source):
-                raise MemoryUpdateError("relationship change requires new evidence")
-            relationship = RelationshipState(stage=change.stage, evidence=source.quote)
-            relationship_source = source
+        with _diagnose_change(change, None, messages, memory):
+            source = _source(change.message_id, change.quote, messages)
+            # A repeated rapport observation preserves its original provenance.
+            if change.stage != relationship.stage or _normalized_quote(source.quote) != _normalized_quote(relationship.evidence):
+                if relationship_source is not None and _same_source(relationship_source, source):
+                    raise MemoryUpdateError("relationship change requires new evidence")
+                relationship = RelationshipState(stage=change.stage, evidence=source.quote)
+                relationship_source = source
 
     # Reject replacement collisions instead of silently losing another target.
     retained = [fact for fact in memory.facts if fact.id not in touched]

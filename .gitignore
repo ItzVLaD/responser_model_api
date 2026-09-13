@@ -16,6 +16,10 @@ dist/
 logs/
 *.log
 
+# Opt-in full context traces contain unredacted private inputs/model output.
+diagnostics/
+summary-*.jsonl
+
 # Editor / OS
 .DS_Store
 .vscode/
