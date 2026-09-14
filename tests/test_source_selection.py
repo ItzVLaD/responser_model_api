@@ -217,7 +217,7 @@ def test_resolved_question_can_be_removed_but_profile_cannot() -> None:
 
 def test_repeated_targets_still_fail_in_final_atomic_merger() -> None:
     previous = migrate_legacy(MemoryContent(interlocutor=["Old preference"]))
-    request = SummarizeContextRequest(previous=previous, messages=[Message(raw_id="new", sender_type="other", text="I like tea.")])
+    request = SummarizeContextRequest(previous=previous, messages=[Message(raw_id="new", sender_type="other", text="I now like tea.")])
     plan = build_selection_plan(request)
     operation = {"action": "replace", "target_id": "t0", "source_id": "s0", "kind": "preference"}
     with pytest.raises(MemoryUpdateError, match="repeated target"):

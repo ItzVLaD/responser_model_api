@@ -39,11 +39,19 @@ For add, scope profile means the source speaker's own self-report: code maps
 INTERLOCUTOR to interlocutor and AGENT to agent. Never treat a statement about
 someone else as a self-report. Use scope interaction for reactions and
 open_threads for genuinely unanswered questions or unfulfilled commitments.
+Age, name, occupation and specialty belong ONLY to profile. Questions are not
+occupation or self_report evidence. Acknowledgements are not durable facts.
+Excerpts marked use=context_only remain visible but cannot be selected; use=age
+means profile/age only, and use=question means question only. Choose the semantic
+kind and scope first, then the matching excerpt. Do not choose an excerpt merely
+because it mentions the topic of a previous fact.
 
 Extract distinct durable details: each speaker's stated age, job, work specialty,
 name, interests, explicit interaction preferences, boundaries and relevant stories.
 Keep the actual values and work detail. Use separate quotes for age, occupation and
 specialty when possible. For kind age, select the short age_excerpt ID if present.
+Check BOTH participants independently for age, occupation and specialty before
+selecting interaction details. Do not overlook the shorter participant's replies.
 Exclude retracted joke ages; save the final corrected declaration instead. A
 retraction is NOT a replacement age: select the actual later age declaration.
 Syntax eligibility is not evidence that an earlier age was not retracted.
@@ -56,6 +64,10 @@ Allowed operations:
 - replace: source_id, kind and required target_id tN from previous facts.
     Keep the target's section and kind. Its correction must come from the same speaker.
     Replace only that fact, never other unrelated facts in the same profile.
+    Newer does not mean corrected: a question or acknowledgement cannot supersede
+    a prior value. If the source does not explicitly change that fact, do not replace it.
+    Non-age replacement choices require an explicit change/correction cue; if a
+    detail is merely additional, use add instead and preserve the earlier fact.
 - remove: ONLY a resolved open_threads question or commitment; required target_id
     tN and source_id proving resolution. Never remove profile facts.
 Nothing else is deleted: code retains all facts you do not target. If no durable
@@ -184,6 +196,9 @@ class OllamaContextSummarizer:
                     "sources": {key: {
                         "evidence": source.evidence.model_dump(mode="json"),
                         "age_eligible": source.age_eligible, "age_only": source.age_only,
+                        "use": source.usage, "excluded_reason": source.excluded_reason,
+                        "correction_signalled": source.correction_signalled,
+                        "allowed_adds": [{"scope": scope, "kind": kind} for scope, kind in source.allowed_adds()],
                     } for key, source in plan.sources.items()},
                     "targets": {key: target.model_dump(mode="json") for key, target in plan.targets.items()},
                     "compatible_changes": [{"action": action, "target_id": target, "kind": kind, "source_ids": list(ids)}
@@ -197,7 +212,7 @@ class OllamaContextSummarizer:
         settings = self._settings
         log.info(
             "summarize: model=%s messages=%d input_bytes=%d has_previous=%s "
-            "summary_id=%s previous_facts=%d max_output_tokens=%d context_window=%d excerpts=%d extraction=source_selection",
+            "summary_id=%s previous_facts=%d max_output_tokens=%d context_window=%d excerpts=%d extraction=source_selection constraints=typed_sources_v2",
             settings.model_name,
             len(request.messages),
             len(payload.encode("utf-8")),

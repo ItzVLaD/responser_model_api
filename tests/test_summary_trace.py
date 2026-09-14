@@ -27,18 +27,18 @@ from responser_model_api.summary_trace import SummaryTrace, SummaryTraceError, S
 
 def _request() -> SummarizeContextRequest:
     return SummarizeContextRequest(previous=MemoryContent(agent=["PRIVATE_OLD_FACT"]), messages=[
-        Message(raw_id="PRIVATE_AGENT", sender_type="me", text="What do you do for work?"),
+        Message(raw_id="PRIVATE_AGENT", sender_type="me", text="I visited PRIVATE_MUSEUM."),
         Message(raw_id="PRIVATE_OTHER", sender_type="other", text="I design PRIVATE_GARDENS."),
-        Message(raw_id="PRIVATE_AGE", sender_type="me", text="I'm 23 and enjoying life!"),
+        Message(raw_id="PRIVATE_STORY", sender_type="me", text="I enjoy quiet weekends."),
     ])
 
 
 def _output() -> dict[str, JsonValue]:
-    # Deliberately semantically wrong, but structurally valid. Tracing must show
-    # the problem, not silently change extraction or assert the memory is good.
+    # A museum visit misclassified as occupation is still semantically wrong.
+    # Negative source guards do not prove every non-question states a job.
     return {"operations": [
         {"action": "add", "source_id": "s0", "scope": "profile", "kind": "occupation"},
-        {"action": "add", "source_id": "s2", "scope": "interaction", "kind": "occupation"},
+        {"action": "add", "source_id": "s2", "scope": "interaction", "kind": "interest"},
     ], "relationship": None}
 
 
@@ -109,11 +109,11 @@ def test_full_trace_contains_every_phase_and_readable_wrong_classification(
     assert data["selection_parsed"]["selection"] == _output()
     assert "s1" in data["selection_parsed"]["unselected_source_ids"]
     assert {"source_id": "s1", "speaker": "other", "text": "I design PRIVATE_GARDENS."} in data["selection_parsed"]["unselected_excerpts"]
-    assert data["resolved_delta"]["delta"]["operations"][0]["quote"] == "What do you do for work?"
+    assert data["resolved_delta"]["delta"]["operations"][0]["quote"] == "I visited PRIVATE_MUSEUM."
     assert data["resolved_delta"]["delta"]["operations"][1]["section"] == "interaction"
     assert data["review"]["sections"]["interlocutor"] == []
     assert "interlocutor" in data["review"]["empty_sections"]
-    assert data["review"]["sections"]["agent"][-1] == {"kind": "occupation", "text": "What do you do for work?"}
+    assert data["review"]["sections"]["agent"][-1] == {"kind": "occupation", "text": "I visited PRIVATE_MUSEUM."}
     assert data["review"]["semantic_correctness_and_completeness"] == "NOT_VALIDATED"
     assert len(data["review"]["added_fact_ids"]) == 2
     assert len(data["review"]["preserved_fact_ids"]) == 1
@@ -121,7 +121,7 @@ def test_full_trace_contains_every_phase_and_readable_wrong_classification(
     assert data["response"]["reader_checkpoint"] == "not_written_by_api"
     assert request.model_dump_json() == original
     assert f"summary_id={summary_id}" in caplog.text
-    assert all(text not in caplog.text for text in ("PRIVATE_", "What do you do for work?", "I'm 23", str(directory)))
+    assert all(text not in caplog.text for text in ("PRIVATE_", "I enjoy quiet weekends.", str(directory)))
     assert all(record.exc_info is None for record in caplog.records)
     trace_file = next(directory.glob("*.jsonl"))
     assert stat.S_IMODE(trace_file.stat().st_mode) == 0o600
@@ -201,6 +201,7 @@ def test_merge_rejection_keeps_actual_failing_operation_details(monkeypatch: pyt
     ], "relationship": None}
     client, _, directory = _setup(monkeypatch, tmp_path, output=output)
     request = _request()
+    request.messages[0].text = "I now work in a PRIVATE_MUSEUM."
     original = request.model_dump_json()
     response = client.post("/summarize_context", json=request.model_dump())
     assert response.status_code == 502 and "target_repeated" in response.text

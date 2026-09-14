@@ -194,6 +194,65 @@ shape, model selection and reader checkpoint policy remain unchanged. Existing
 contexts are not rebuilt or rewritten automatically. Restart the model API;
 start logs will include `extraction=source_selection` and `excerpts`.
 
+#### Typed-source guards (v2)
+
+Inspection of four complete diagnostic batches (118 messages) showed that raw
+selections, resolved quotes and saved memory matched exactly. No input text was
+lost and all completions stopped normally. The schema itself still allowed the
+bad choices: age-as-occupation, question-as-occupation, and replacing a factual
+value with an acknowledgement. The model also omitted available work details.
+This was not a storage/preview-list bug or a token-limit failure.
+
+The source selector now shares one allowed-use table between its grammar and
+resolver:
+- Bare supported ages and short age excerpts can only be `profile/age`; they
+  cannot evade age checks by selecting `self_report` or `occupation` instead.
+- Age, name, occupation and specialty kinds belong only to profiles.
+- Excerpts containing `?` or supported direct-question prefixes can only use
+  `question` under interaction/open threads, never supply a profile statement.
+- A small exact-match list of standalone acknowledgements/fragments remains
+  context-only: it cannot add/replace facts or change relationship state. Longer
+  meaningful statements containing those words are not removed.
+- The adjacent **same-speaker age → explicit retraction → corrected age** pattern
+  excludes the earlier source from all selection choices, without hiding text.
+  This intentionally does not infer arbitrary distant or cross-batch retractions.
+- Non-age replacements require an explicit change/correction cue (for example
+  `now`, `instead`, or `correction`) in the excerpt or an immediately preceding
+  correction prefix within the same message. Freshness alone is insufficient.
+  A cue is necessary but not sufficient proof: unrelated statements with a cue
+  can still be misinterpreted. Legitimate unmarked corrections may be missed.
+
+Ordinary commas no longer fragment sentences; a narrow comma boundary still
+separates a retraction prefix from a corrected age. Sentence/size limits remain.
+This preserves subjects and qualifiers and avoids treating fragments as complete
+claims. All source characters remain in chronological model context. Grammar
+field order chooses kind/scope (or target) before source ID; that is a usability
+change for decoding, not proof of improved semantic reasoning.
+
+Trace sources include `use`, `allowed_adds`, `excluded_reason`, and
+`correction_signalled`. Startup/request metadata includes
+`constraints=typed_sources_v2`. These are **negative guards**, not a complete
+semantic validator: compound age-and-job sentences remain eligible for multiple
+kinds so work details are not discarded, and the model must still extract all
+useful details. Repeated/conflicting targets still reject the whole delta.
+
+An intermediate read-only replay with typed sources populated the interlocutor's
+occupation and the agent's age, but omitted the work specialty and failed batch
+three on repeated replacements. The additional correction-cue requirement was
+then added. That replay is not a successful complete rebuild or evidence that
+all semantic problems are fixed. Existing saved mistakes/checkpoints have not
+been edited: repairing past omissions still requires a separately authorized
+rebuild from source history after extraction quality is verified.
+
+Final v2 evaluation on the unchanged live synthetic tests still returned
+**1 passed, 1 failed**: retention passed, while initial extraction selected the
+interlocutor's age/occupation/specialty but omitted the agent profile entirely.
+The test failed before later updates. This establishes a remaining coverage
+problem, not another citation/storage bug; v2 must not be described as reliable
+complete extraction. Further work needs explicit per-participant coverage
+evaluation and/or a more capable extractor, not weaker validation or repeated
+full-history retries. The current model and one-call design remain unchanged.
+
 **Remaining limitations:** selecting a genuine excerpt does not prove its
 meaning. The model must still distinguish a self-report from a statement about
 someone else, choose a corrected age rather than a retracted earlier one, decide
