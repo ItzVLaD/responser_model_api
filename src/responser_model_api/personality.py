@@ -73,6 +73,8 @@ class Personality(BaseModel):
     language: str = ""
     # How the persona uses emojis (e.g. "rarely", "loves 😂 and 🔥").
     emoji_usage: str = ""
+    # Opt-in punctuation/emoji cleanup for casual texting, not formal personas.
+    casual_texting: bool = False
     # Recognizable catchphrases or filler words the persona often uses.
     signature_phrases: list[str] = Field(default_factory=list)
     # Topics/interests the persona talks about comfortably.

@@ -12,6 +12,7 @@ from ollama import ChatResponse, Client
 from .config import OLLAMA_HOST, RESPONSE_FORMAT_INSTRUCTIONS, GenerationSettings
 from .logging_config import LOG_PROMPTS, get_logger
 from .personality import Personality
+from .reply_style import polish_reply, reply_style_guidance
 from .schemas import ChatSnapshot, GeneratedReply
 
 log = get_logger()
@@ -40,7 +41,8 @@ _REFUSAL_MARKERS: tuple[str, ...] = (
 
 # Neutral, in-character-ish deflection used only if the model keeps refusing.
 # Deliberately vague so it fits most personas without generating any real content.
-_DEFLECTION_FALLBACK = "haha nah, let's not go there. anyway, what else is up?"
+_DEFLECTION_FALLBACK = "I'd rather not get into that"
+_STYLE_FALLBACK = "I'm not sure what to say"
 
 # Chat-template role labels. Some models keep generating past their reply and
 # emit the header of the next turn (e.g. a trailing "system"/"user"/"assistant"),
@@ -450,6 +452,7 @@ def _snapshot_to_messages(
 ) -> list[dict[str, str]]:
     """Map a ChatSnapshot into an Ollama/OpenAI-style messages array."""
     system_prompt = _system_prompt(personality)
+    system_prompt += "\n\n" + reply_style_guidance(snapshot, personality)
     if snapshot.retrieval_context is not None:
         # Retrieved turns stay in one untrusted data block, never additional
         # assistant turns. Alias references avoid repeating private source text.
@@ -525,7 +528,8 @@ def _snapshot_to_messages(
     messages.append(
         {
             "role": "user",
-            "content": f"Write my next reply to this conversation. {_length_budget(snapshot).note}",
+            "content": f"Write my next reply to this conversation. {_length_budget(snapshot).note} "
+                       "Answer directly and stop; no service sign-off or automatic topic redirect.",
         }
     )
     return messages
@@ -573,33 +577,45 @@ class OllamaReplyGenerator:
         text = _finalize(response)
         if LOG_PROMPTS:
             log.debug("raw completion: %r", text)
+        styled = polish_reply(text, snapshot, self._personality)
+        text = styled.text
 
         # If the model's alignment produced an out-of-character AI refusal, nudge
         # it once to answer as the person; if it still refuses, deflect in a
         # neutral, human way rather than shipping assistant boilerplate.
-        if _looks_like_refusal(text):
-            log.warning("refusal detected; regenerating in character")
+        refused = _looks_like_refusal(text)
+        if refused or not text:
+            log.warning("reply rewrite requested: reason=%s", "refusal" if refused else "only_stock_closing")
             # Keep the retry instruction in the original system prompt too;
             # trailing system turns can leak into the generated reply.
             nudge = [
                 {
                     "role": "system",
-                    "content": messages[0]["content"] + "\n\n" + (
+                    "content": messages[0]["content"] + "\n\n" + ((
                         "That last reply was an out-of-character AI refusal. "
                         f"Reply again as {self._personality.name}, a real person. "
                         "Do not use any AI disclaimers. If you would rather not "
                         "engage, just brush it off, joke, or change the subject "
                         "like a human would."
-                    ),
+                    ) if refused else (
+                        "The candidate contained only a stock closing. Write a short direct "
+                        "response to the latest message, not an offer of further assistance. "
+                        "No service sign-off, generic topic redirect, or decorative emoji."
+                    )),
                 }
             ] + messages[1:]
             response = self._chat(nudge, max_tokens)
-            retry_text = _finalize(response)
-            if _looks_like_refusal(retry_text):
-                log.warning("retry still refused; using deflection fallback")
-                text = _DEFLECTION_FALLBACK
+            styled = polish_reply(_finalize(response), snapshot, self._personality)
+            retry_text = styled.text
+            if not retry_text or _looks_like_refusal(retry_text):
+                log.warning("reply rewrite unusable; using short fallback")
+                text = _DEFLECTION_FALLBACK if refused else _STYLE_FALLBACK
             else:
                 text = retry_text
+
+        if styled.removed_closings or styled.removed_emojis or styled.removed_period:
+            log.info("reply style cleanup: closings=%d emojis=%d terminal_period=%s",
+                     styled.removed_closings, styled.removed_emojis, styled.removed_period)
 
         elapsed_ms = (time.monotonic() - started) * 1000
         log.info(

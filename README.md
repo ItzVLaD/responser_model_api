@@ -198,6 +198,56 @@ edit can shape tone but cannot break the reply contract or the human-acting rule
 The fixed contract requires English; a persona's `language` field describes its
 English voice or dialect. Summaries do not use the selected personality.
 
+### Natural chat style and repetition controls
+
+Mia enables `casual_texting: true`. This optional personality field defaults to
+`false`, so formal personas keep their sentence-ending periods. Mia's examples
+now demonstrate mostly emoji-free responses, without automatic follow-up
+questions; the emoji instructions no longer list a small set to copy every turn.
+
+The reply prompt considers the last **three agent turns in the supplied snapshot**:
+- If a recent reply used “let's”, guidance asks for a direct response without
+  that construction. There is no global or cross-chat history cache.
+- It discourages generic help offers, service sign-offs, automatic topic
+  redirects and questions added only to keep the conversation going.
+- Summary notes about de-escalation are evidence about the past, not a command
+  to respond like a coach or support agent.
+- Casual mode requests no emoji after an emoji-bearing previous reply; otherwise
+  at most one when useful, without reusing an emoji from the recent sample.
+
+After normal chat-template cleanup, conservative output polishing removes whole
+recognized stock closing sentences such as “Let me know what else you want”.
+Specific requests such as “Let me know when you get home?” are left alone.
+Only recognized generic “let's” closing pivots are removed after recent reuse;
+specific suggestions are preserved. This is not a blanket word ban.
+
+For casual personas, polishing also removes a final sentence period (including
+one before a trailing emoji) and limits repeated decorative suffix emojis.
+Internal punctuation, question marks, exclamations, ellipses, abbreviations,
+URLs, filename-like tokens and quoted material are preserved conservatively.
+The `emoji` dependency handles multi-codepoint sequences together, including
+joiners and skin-tone modifiers. Inline symbols, flags, keycaps and emoji-only
+replies are not erased because they may carry the message's meaning. Text with
+backticks is excluded from polishing to protect code/examples.
+
+Normal trimming adds **no inference call**. If the entire output is just a stock
+closing, it may use the existing single rewrite budget, shared with refusal
+handling: at most **two total model calls**, not separate retry loops. An unusable
+rewrite gets a short fallback rather than another help offer or “let's” redirect.
+Ordinary logs report cleanup counts only; the existing final-reply logging policy
+is unchanged. Saved history and summary contents are never rewritten for style.
+
+Restart the API after installing updated dependencies/loading the changed persona.
+`RESPONSER_CONTEXT_MODE=summary` remains the reader default; summary batching and
+checkpoint rules are unaffected. No model, temperature or token-budget changes
+are needed for these controls.
+
+Offline regression tests cover the reported phrases and content-preservation
+edge cases. The optional `RESPONSER_RUN_REPLY_STYLE_LIVE_TESTS=1` synthetic smoke
+test passed with `nous-hermes2` at temperature 0.6 (about 192 seconds for the test).
+It checks one final reply, not long-run repetition frequency or universal naturalness;
+novel boilerplate and subtle repetition can still escape these limited rules.
+
 ## Optional retrieval reply context (API 0.4.0 compatibility)
 
 With explicit reader `RESPONSER_CONTEXT_MODE=retrieval`, the optional searchable
