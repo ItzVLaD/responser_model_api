@@ -524,7 +524,7 @@ def test_summary_endpoint_is_separate(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_api_contract_version() -> None:
     contract = TestClient(app_module.app).get("/openapi.json").json()
-    assert contract["info"]["version"] == "0.3.0"
+    assert contract["info"]["version"] == "0.4.0"
 
 
 @pytest.mark.parametrize("legacy", [False, True], ids=["canonical", "legacy"])

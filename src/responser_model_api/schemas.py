@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from typing import Annotated, Literal, Optional, Self
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, JsonValue, StringConstraints, model_validator
 
 SenderType = Literal["me", "other", "system"]
 FactSection = Literal["interlocutor", "agent", "interaction", "open_threads"]
@@ -29,6 +29,149 @@ MAX_SUMMARY_INPUT_BYTES = 12_000
 MAX_PERSISTED_MEMORY_BYTES = 48_000
 MAX_SUMMARY_WIRE_BYTES = 64_000
 MAX_MEMORY_FACTS = 64
+MAX_RETRIEVAL_BYTES = 12_000
+
+
+def _unique_message_references(references: list[str]) -> list[str]:
+    """Reject duplicates within a category, not reuse across categories."""
+    if len(set(references)) != len(references):
+        raise ValueError("message references must be unique within each list")
+    return references
+
+
+MessageReferences = Annotated[list[NonEmptyString], AfterValidator(_unique_message_references)]
+
+
+class HistoryEvidence(BaseModel):
+    """An attributed archive excerpt, not a verified fact or an instruction."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    message_id: NonEmptyString = Field(max_length=128)
+    sequence: int = Field(ge=1)
+    sender_type: SenderType
+    text: str = Field(min_length=1, max_length=1200)
+    timestamp: Optional[str] = None
+    truncated: bool = False
+
+
+class ProfileCandidates(BaseModel):
+    """UNVERIFIED categorization of message IDs, never extracted profile values."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: MessageReferences = Field(default_factory=list, max_length=4)
+    age: MessageReferences = Field(default_factory=list, max_length=4)
+    occupation: MessageReferences = Field(default_factory=list, max_length=4)
+    specialty: MessageReferences = Field(default_factory=list, max_length=4)
+    interests: MessageReferences = Field(default_factory=list, max_length=4)
+    preferences: MessageReferences = Field(default_factory=list, max_length=4)
+    boundaries: MessageReferences = Field(default_factory=list, max_length=4)
+    background: MessageReferences = Field(default_factory=list, max_length=4)
+
+    def reference_lists(self) -> dict[str, list[str]]:
+        """Expose typed references without deriving or interpreting their values."""
+        return {
+            "name": self.name, "age": self.age, "occupation": self.occupation,
+            "specialty": self.specialty, "interests": self.interests,
+            "preferences": self.preferences, "boundaries": self.boundaries,
+            "background": self.background,
+        }
+
+
+class ConversationStateCandidates(BaseModel):
+    """UNVERIFIED references; questions/commitments are NOT guaranteed unresolved."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    questions: MessageReferences = Field(default_factory=list, max_length=4)
+    commitments: MessageReferences = Field(default_factory=list, max_length=4)
+    boundaries: MessageReferences = Field(default_factory=list, max_length=4)
+    reactions: MessageReferences = Field(default_factory=list, max_length=4)
+
+    def reference_lists(self) -> dict[str, list[str]]:
+        """Keep candidate labels separate from any claim about current state."""
+        return {
+            "questions": self.questions, "commitments": self.commitments,
+            "boundaries": self.boundaries, "reactions": self.reactions,
+        }
+
+
+class RetrievalContext(BaseModel):
+    """Bounded chronological evidence and unverified reference-only candidates."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence: list[HistoryEvidence] = Field(max_length=32)
+    agent: ProfileCandidates = Field(default_factory=ProfileCandidates)
+    interlocutor: ProfileCandidates = Field(default_factory=ProfileCandidates)
+    conversation_state: ConversationStateCandidates = Field(default_factory=ConversationStateCandidates)
+    relevant_message_ids: MessageReferences = Field(max_length=12)
+    archive_message_count: int = Field(ge=0)
+    history_complete: bool = True
+    budget_exhausted: bool = False
+
+    @model_validator(mode="after")
+    def check_evidence_and_references(self) -> Self:
+        """Validate structure and attribution only; do not infer semantic claims."""
+        if len(self.model_dump_json().encode("utf-8")) > MAX_RETRIEVAL_BYTES:
+            raise ValueError("serialized retrieval context exceeds 12000 UTF-8 bytes")
+        by_id = {item.message_id: item for item in self.evidence}
+        if len(by_id) != len(self.evidence):
+            raise ValueError("retrieval evidence message IDs must be unique")
+        sequences = [item.sequence for item in self.evidence]
+        if len(set(sequences)) != len(sequences):
+            raise ValueError("retrieval evidence sequences must be unique")
+        if sequences != sorted(sequences):
+            raise ValueError("retrieval evidence must be chronological by sequence")
+
+        groups: list[tuple[dict[str, list[str]], SenderType | None]] = [
+            (self.agent.reference_lists(), "me"),
+            (self.interlocutor.reference_lists(), "other"),
+            (self.conversation_state.reference_lists(), None),
+            ({"relevant_message_ids": self.relevant_message_ids}, None),
+        ]
+        for fields, expected_speaker in groups:
+            for references in fields.values():
+                for message_id in references:
+                    source = by_id.get(message_id)
+                    if source is None:
+                        raise ValueError("references must identify supplied evidence")
+                    if source.sender_type == "system":
+                        raise ValueError("service evidence cannot be referenced")
+                    if expected_speaker is not None and source.sender_type != expected_speaker:
+                        raise ValueError("profile reference speaker mismatch")
+        return self
+
+    def prompt_view(self) -> dict[str, JsonValue]:
+        """Show text once, oldest first, with local aliases and no archive metadata.
+
+        Removing source IDs, absolute sequences and storage counts keeps this
+        projection bounded without dropping any evidence or filling unknowns.
+        Reply instructions supply precedence and unresolved-state caveats.
+        """
+        aliases = {item.message_id: f"e{index}" for index, item in enumerate(self.evidence, 1)}
+        evidence: list[JsonValue] = [
+            {"alias": aliases[item.message_id], "speaker": item.sender_type,
+             "text": item.text, "timestamp": item.timestamp, "truncated": item.truncated}
+            for item in self.evidence
+        ]
+        result: dict[str, JsonValue] = {
+            "candidate_status": "UNVERIFIED categorization",
+            "limited": self.budget_exhausted,
+            "complete": self.history_complete,
+            "evidence": evidence,
+        }
+        for section, candidates in (
+            ("agent", self.agent), ("interlocutor", self.interlocutor),
+            ("conversation_state", self.conversation_state),
+        ):
+            fields: dict[str, JsonValue] = {}
+            for field, references in candidates.reference_lists().items():
+                fields[field] = [aliases[message_id] for message_id in references]
+            result[section] = fields
+        result["relevant"] = [aliases[message_id] for message_id in self.relevant_message_ids]
+        return result
 
 
 class FactEvidence(BaseModel):
@@ -211,6 +354,19 @@ class ChatSnapshot(BaseModel):
     platform: Optional[str] = None
     account_name: Optional[str] = None
     context: ConversationContext | None = None
+    retrieval_context: RetrievalContext | None = None
+
+    @model_validator(mode="after")
+    def check_context_sources(self) -> Self:
+        """Never mix legacy memory with retrieval or repeat recent source IDs."""
+        if self.retrieval_context is None:
+            return self
+        if self.context is not None:
+            raise ValueError("context and retrieval_context are mutually exclusive")
+        recent_ids = {message.raw_id for message in self.messages if message.raw_id is not None}
+        if any(item.message_id in recent_ids for item in self.retrieval_context.evidence):
+            raise ValueError("retrieval evidence overlaps recent message IDs")
+        return self
 
 
 class GenerateReplyRequest(BaseModel):

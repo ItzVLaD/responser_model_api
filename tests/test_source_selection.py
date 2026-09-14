@@ -317,5 +317,5 @@ def test_relationship_selection_and_http_contract_stay_separate(monkeypatch: pyt
     assert memory.relationship.evidence == request.messages[0].text
     assert memory.relationship_source == FactEvidence(message_id="source", sender_type="other", quote=request.messages[0].text)
     contract = client.get("/openapi.json").json()
-    assert contract["info"]["version"] == "0.3.0"
+    assert contract["info"]["version"] == "0.4.0"
     assert "SelectionDelta" not in contract["components"]["schemas"]

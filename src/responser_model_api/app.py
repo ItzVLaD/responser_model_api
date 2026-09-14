@@ -6,10 +6,13 @@ Run locally with:
 
 from __future__ import annotations
 
+from threading import Lock
+
 from fastapi import FastAPI, HTTPException
 
 from .config import load_active_personality, load_generation_settings, load_summary_settings
-from .context_summarizer import ContextSummaryError, OllamaContextSummarizer
+from .context_summarizer import ContextSummaryError
+from .simple_context import SimpleContextSummarizer
 from .logging_config import configure_logging
 from .ollama_client import OllamaReplyGenerator
 from .schemas import (
@@ -23,8 +26,8 @@ log = configure_logging()
 
 app = FastAPI(
     title="Responser Model API",
-    version="0.3.0",
-    description="Generates replies and structured conversation memory using Ollama.",
+    version="0.4.0",
+    description="Generates replies from recent messages and compact conversation summaries using Ollama.",
 )
 
 # The personality and generation settings are selected once at startup (via env)
@@ -33,11 +36,14 @@ _personality = load_active_personality()
 _settings = load_generation_settings()
 _generator = OllamaReplyGenerator(personality=_personality, settings=_settings)
 _summary_settings = load_summary_settings()
-_summarizer = OllamaContextSummarizer(
+_summarizer = SimpleContextSummarizer(
     settings=_summary_settings, reply_model_name=_settings.model_name,
 )
+# A client timeout does not cancel a synchronous Ollama request. Reject new
+# work while it finishes rather than building an ever-longer inference queue.
+_inference_lock = Lock()
 log.info(
-    "model API ready: personality=%s model=%s temperature=%.2f context_model=%s",
+    "model API ready: personality=%s model=%s temperature=%.2f context_model=%s context_extraction=simple_summary inference_concurrency=1",
     _personality.name,
     _settings.model_name,
     _settings.temperature,
@@ -52,11 +58,15 @@ def health() -> dict[str, str]:
 
 @app.post("/generate_reply", response_model=GeneratedReply)
 def generate_reply(request: GenerateReplyRequest) -> GeneratedReply:
+    if not _inference_lock.acquire(blocking=False):
+        raise HTTPException(status_code=503, detail="model inference busy; retry after the active request finishes", headers={"Retry-After": "30"})
     try:
         reply = _generator.generate(request.snapshot)
     except Exception as exc:  # surface Ollama/model errors as 502
         log.exception("generation failed")
         raise HTTPException(status_code=502, detail=f"generation failed: {exc}") from exc
+    finally:
+        _inference_lock.release()
 
     return reply
 
@@ -64,6 +74,8 @@ def generate_reply(request: GenerateReplyRequest) -> GeneratedReply:
 @app.post("/summarize_context", response_model=SummarizeContextResponse)
 def summarize_context(request: SummarizeContextRequest) -> SummarizeContextResponse:
     """Fail closed: never substitute a reply or old memory for a failed summary."""
+    if not _inference_lock.acquire(blocking=False):
+        raise HTTPException(status_code=503, detail="model inference busy; retry after the active request finishes", headers={"Retry-After": "30"})
     try:
         return _summarizer.summarize(request)
     except ContextSummaryError as exc:
@@ -83,3 +95,5 @@ def summarize_context(request: SummarizeContextRequest) -> SummarizeContextRespo
             status_code=502,
             detail="context summary failed; verify the local summary model and its budgets",
         ) from None
+    finally:
+        _inference_lock.release()

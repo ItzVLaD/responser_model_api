@@ -3,13 +3,91 @@
 Local HTTP API that turns chat snapshots into replies and structured conversation
 memory using Ollama-hosted models. Replies and summaries are written in English.
 It owns the inter-module contract (Pydantic schemas + OpenAPI at `/openapi.json`),
-version **0.2.0**. The API itself is stateless; the reader owns context persistence.
+version **0.4.0**. The API itself is stateless; the reader owns context persistence.
+
+## Current default: compact rolling summary
+
+The default `/summarize_context` implementation is now `SimpleContextSummarizer`,
+not source-excerpt selection. The reader defaults to `RESPONSER_CONTEXT_MODE=summary`.
+The retrieval and fact-selection implementations remain for compatibility/tests;
+they are **not in the default context preparation path**. No archive or saved
+context is deleted by this rollback.
+
+The model receives only the previous plain-language summary and chronological
+messages labelled `INTERLOCUTOR`, `AGENT` or `SERVICE_EVENT`. It returns:
+- `interlocutor`: stated age/name, work and specialty/projects, preferences,
+  boundaries, interests and important background about the other person.
+- `agent`: the account's stated details and relevant experiences.
+- `interaction`: important reactions, communication requests and misunderstandings.
+- `open_threads`: genuinely unanswered questions or unfulfilled commitments.
+- `relationship`: stage and a short supported reason, or unknown.
+
+There are **no model-selected IDs, citations, per-fact kinds, or edit operations**.
+Each call returns an updated whole summary. Instructions include explicitly
+labelled examples of useful details, irrelevant filler, separate participants,
+age retractions and resolved promises. Examples are not current-chat facts.
+Previous useful notes should be retained unless corrected, but this is a model
+task now—not a deterministic guarantee that untargeted facts survive.
+
+Output limits are eight notes per list, 200 characters per note, **3,200 JSON
+characters / 8,000 UTF-8 bytes** for the whole summary. The prompt aims for
+150–300 words. Empty/missing/malformed/truncated model output is rejected;
+unknown fields use empty lists. The compatible HTTP response remains
+`{memory, model_name}`; unused proof fields default empty/null. The reader omits
+those unused fields from newly saved simple memory, leaving only the five
+summary fields plus its existing checkpoint envelope.
+
+**Batching:** the trigger remains **more than 30** unsummarized messages and
+the latest **10** remain raw. Only first-time imports with **more than 40 total
+messages and no saved context** use batches capped at 20 (or a smaller configured
+batch limit). New 31–40-message chats and existing-context updates keep the
+configured normal batch size, default 30. An initial 128-message history becomes
+six summary calls: 20 + 20 + 20 + 20 + 20 + 18, followed by the latest 10 raw turns.
+Byte-budget fragmentation and all-or-none checkpoint commits remain unchanged.
+More, smaller calls can improve tractability but may increase total import time.
+
+**Existing data:** old fact-backed memory remains loadable. All canonical fact
+text is supplied to the next simple summary without IDs or duplicate previews;
+the model consolidates it. Loading alone never rewrites the file. Existing wrong
+notes are not magically corrected, and missing pre-checkpoint information cannot
+be recovered from the raw tail. A clean full-history rebuild requires a separate
+explicit decision; a different `RESPONSER_CONTEXT_DIR` can be used to test without
+overwriting the old context. Summary mode does not read/write retrieval archives.
+
+Restart **both services**. Remove any reader `RESPONSER_CONTEXT_MODE=retrieval`
+override or set it to `summary`. API startup/request logs should show
+`context_extraction=simple_summary` / `extraction=simple_summary`. Reply model,
+temperature, recent-message priority and dry-run/live selection are unchanged.
+
+### Reply latency and overlapping requests
+
+The observed retrieval prompts reached 4,090 tokens, with replies taking longer
+than the reader's 300-second timeout. Client timeouts do not cancel a synchronous
+Ollama call. The API now rejects overlapping reply/summary requests with
+**503** and `Retry-After: 30` instead of adding work while an earlier call is still
+active. The lock is process-local: run **one Uvicorn worker** for this local CPU
+service. It does not coordinate other API processes or direct Ollama callers,
+cancel an already running call, or make inference itself faster. Health/OpenAPI
+remain available while inference is busy; the reader retains its normal backoff.
+
+Restart/stop the old reader and API processes before testing the rollback, rather
+than running old and new services simultaneously. No timeout or model change was
+used to disguise latency. Prefer `dry_run`; it prevents sending but still writes
+valid summary checkpoints.
+
+**Validation result:** a real-Qwen synthetic 20-message check produced a compact
+336-character summary in about 65 seconds with both ages/jobs and the other's
+work specialty, but omitted a cycling detail. Its strict test failed at that
+assertion; the later correction and example-contamination assertions were not
+reached. This does not establish complete extraction or end-to-end reply speed.
+The opt-in test remains unchanged (`RESPONSER_RUN_SIMPLE_SUMMARY_LIVE_TESTS=1`).
 
 ## Setup
 
 ```bash
 # 1. Install Ollama (https://ollama.com) and pull the configured models once
 ollama pull nous-hermes2:latest
+# Independent context model used by the default rolling summary:
 ollama pull qwen2.5:7b
 
 # 2. Create a virtual environment and install the package
@@ -120,16 +198,72 @@ edit can shape tone but cannot break the reply contract or the human-acting rule
 The fixed contract requires English; a persona's `language` field describes its
 English voice or dialect. Summaries do not use the selected personality.
 
-## Persisted conversation context
+## Optional retrieval reply context (API 0.4.0 compatibility)
 
-The two endpoints are independent. A client that uses persisted context must
+With explicit reader `RESPONSER_CONTEXT_MODE=retrieval`, the optional searchable
+history path sends a recent raw window plus
+`snapshot.retrieval_context` directly to `/generate_reply`. No summary inference
+is required, so extraction omissions no longer remove the only retained copy of
+old information. The reply model and personality selection remain unchanged.
+
+The new optional payload contains:
+- Chronological `HistoryEvidence` records: original message ID, sequence, source
+  speaker, exact source text/excerpt, optional timestamp and truncation flag.
+- `agent` and `interlocutor` structured **candidate** fields: name, age,
+  occupation, specialty, interests, preferences, boundaries and background.
+- Separate `conversation_state` candidate questions, commitments, boundaries
+  and reactions, plus query-relevant references.
+
+Candidate fields contain IDs referencing supplied evidence—not model-written
+fact prose. The contract validates unique chronological evidence, existing
+references, correct profile speaker attribution, no service-event candidate
+references, bounded counts and a **12,000 UTF-8 byte** context cap. Legacy
+`context` and `retrieval_context` cannot coexist; retrieved evidence cannot
+repeat source IDs already in the recent raw messages. Existing summary wire
+shapes remain compatible. `/health` stays unchanged; readers check the OpenAPI
+retrieval definitions to reject incompatible APIs before generation.
+
+Reply prompts replace original IDs with request-local aliases and print each
+evidence text once. Candidate classifications are **UNVERIFIED**, empty fields
+remain unknown, and questions/commitments are **not guaranteed unresolved**.
+Newer source corrections and recent raw turns take precedence. Archive size
+does not establish rapport. Partial budgets/truncated excerpts are flagged; a
+missing retrieved detail does not prove it was never stated. All retrieved
+text is untrusted evidence, never privileged instructions. Debug reply prompt
+logging redacts the retrieval-bearing system prompts; generated replies can
+still disclose recalled information and are logged at INFO as before.
+
+Raw history and SQLite FTS search belong entirely to the independent reader.
+No runtime imports, archive paths, account IDs, or database access cross into
+this API. See the reader README for the approved full-text retention policy,
+owner-only permissions, retrieval limits, overlap refresh, and explicit deletion.
+Existing summary files are left untouched and are not included in retrieval-mode
+prompts. Upgrade/restart both projects to opt into retrieval; the default remains
+reader `RESPONSER_CONTEXT_MODE=summary`.
+
+The retrieval tests measure source recall separately from model answers.
+`RESPONSER_RUN_RETRIEVAL_LIVE_TESTS=1` enables an optional synthetic downstream
+reply comparison in `tests/test_retrieval_quality_live.py`; it uses temporary
+archives, requires the sibling reader checkout, and never sends chat messages.
+No broad semantic-quality guarantee follows from a small benchmark.
+
+Measured on the installed `nous-hermes2` at temperature 0.1: the same synthetic
+question recovered **0/3** old details using only the recent window, versus
+**3/3** with retrieval (corrected age, occupation and work specialty; no retracted
+age). Reply inference took 101.9 s versus 92.9 s in that single run. This is a
+factual-use smoke test, not proof that retrieval is generally faster or accurate
+on every conversation. There were no summary-model calls or private inputs.
+
+## Rolling summary transport and checkpoint contract
+
+The two endpoints are independent. A client using summary mode must
 **finish summarization successfully before requesting a reply**:
 
 1. Send `POST /summarize_context` with `previous` (the last `MemoryContent`, or
   `null`) and `messages` (a chronological batch of **1–30** `Message` objects).
-  The response is `{memory, model_name}`: the complete memory **merged by code**.
-  Internally the model produces only evidence-backed operations, not a rewritten
-  summary. Pass previous memory on every batch; unrelated facts remain unchanged.
+  The response is `{memory, model_name}`: a complete updated **simple summary**.
+  Pass previous memory on every batch. Output shape and size are checked in code;
+  preserving unrelated details is instructed but is not semantically guaranteed.
 2. Only after success, the reader persists a `ConversationContext` containing
   `memory`, `last_message_id`, `summarized_message_count` (at least 1),
   `model_name`, and `updated_at`. Metadata strings must be nonempty. The reader,
@@ -143,7 +277,12 @@ The two endpoints are independent. A client that uses persisted context must
   summarized messages are not repeated as raw turns. Relationship guidance uses persisted evidence
   rather than the visible message count, with current boundaries taking priority.
 
-### Protected fact records (API 0.3.0)
+### Older protected fact records (compatibility, not new default output)
+
+The next sections document the former fact-selection implementation and its
+experiments. Those modules/tests are retained, but the endpoint now uses the
+compact implementation described above. In particular, deterministic fact
+preservation and source-validation claims below apply only to that older path.
 
 `MemoryContent.facts` is the canonical collection, up to **64** records. Each has
 a code-generated ID, section, kind, exact text, and evidence containing a source
@@ -160,9 +299,9 @@ without rewriting their original provenance; semantic paraphrase deduplication i
 not guaranteed. When no previous facts exist, constrained decoding allows only
 additions. Later replacements/removals require compatible existing targets.
 
-### Source-excerpt selection (internal extraction)
+### Source-excerpt selection (former internal extraction)
 
-The summarizer now asks the model to **select evidence**, not copy it. Code splits
+The former summarizer asks the model to **select evidence**, not copy it. Code splits
 the current messages into exact bounded excerpts, labelled `s0`, `s1`, etc.; all
 original message text stays visible in chronological order as context. Excerpts
 are limited to 200 characters and never joined across messages. Missing source
@@ -252,6 +391,51 @@ problem, not another citation/storage bug; v2 must not be described as reliable
 complete extraction. Further work needs explicit per-participant coverage
 evaluation and/or a more capable extractor, not weaker validation or repeated
 full-history retries. The current model and one-call design remain unchanged.
+
+#### Quality-gated participant experiment (not enabled in production)
+
+`tests/participant_experiment.py` is an isolated test-only prototype: two
+participant-specific profile passes, one interaction/open-thread pass, and one
+explicit coverage review. Every pass keeps the whole conversation visible, but
+the profile schemas/resolvers can select only that participant's evidence and
+targets. The first three deltas merge atomically against the original registry;
+the fourth reviews category coverage in the provisional result. No result is
+returned until all validation succeeds. It can require **four model calls per
+batch instead of one**, using the same model/temperature/context/output budgets.
+The model's coverage review is not an independent proof that nothing was missed.
+
+`tests/test_participant_quality_live.py` compares this hypothesis against the
+current single-pass extractor using invented ground truth. Set
+`RESPONSER_RUN_PARTICIPANT_EXPERIMENT=1` to opt into the live comparison. Ordinary
+pytest skips it. The gate requires all six expected profile facts with correct
+section AND kind, no unsupported/misclassified facts or retracted age, and a
+strict coverage improvement over the baseline. Both participant role orders
+are tested, followed by seeded retention and a targeted correction. Expected
+answers are used only by the scorer, never sent to either extractor.
+
+The prototype is not imported by production, does not change configuration,
+never reads private transcripts, and does not persist context or send messages.
+Its live gate must pass before considering runtime integration; a failed gate
+must not be relaxed to justify the additional inference cost. Even a passing
+small-corpus gate would not prove reliability on arbitrary chat histories.
+
+**Measured decision (2026-09-13): do not integrate this prototype.** The paired
+original-role test on local Qwen2.5:7b produced:
+
+| Variant | Required facts covered | Extra/misclassified facts under the rubric | Model calls | Elapsed |
+|---------|------------------------|--------------------------------------------|-------------|---------|
+| Current single pass | 3 / 6 | 0 | 1 | 95.8 s |
+| Participant passes + review | 5 / 6 | 4 | 4 | 379.8 s |
+
+The prototype still missed the agent's story. Neither result included the
+retracted age. Greater recall came with worse precision and about four times
+the latency, so the unchanged acceptance gate failed. The four flagged facts
+were not credited as correctly classified ground-truth facts; this does not
+mean their source quotations were fabricated. The run stopped at its first
+failure, so swapped-role and seeded-retention/correction gates were **not run**.
+No runtime implementation, model/configuration switch, private-history replay
+or saved-context rebuild was performed. The test-only experiment is retained
+for reproducible comparisons, not offered as a proven quality improvement.
 
 **Remaining limitations:** selecting a genuine excerpt does not prove its
 meaning. The model must still distinguish a self-report from a statement about
@@ -412,6 +596,13 @@ Use this when a summary succeeds but contains wrong classifications, omitted
 facts, or an empty profile. The trace exposes decisions; it does **not** fix or
 certify semantic quality.
 
+The **simple-summary default** records `request_received`, `previous_prepared`,
+`inference_request`, `inference_response`, `summary_validated`, `review`,
+`response`, and `completed` (or `summary_schema_rejected` / `failed`). The review
+contains the plain summary lists. It has no selection/merge events because the
+model no longer proposes source IDs or operations. The fuller stage table below
+also covers existing traces and tests of the former fact-selection pipeline.
+
 **Warning:** traces contain unredacted chat text, previous memory, message IDs,
 exact prompts, selected/unselected excerpts and model output. Secrets present
 in that data can also be captured. Keep traces local; review and redact before
@@ -488,6 +679,10 @@ A 502 from `/summarize_context` can mean **model output was rejected**, not that
 the API or Ollama was unreachable. Context errors now expose an allowlisted
 `reason` in logs and the HTTP detail without printing message text or evidence:
 
+- `summary_schema_invalid`: the simple summary has invalid/missing fields or
+  exceeds the compact output limits. No partial summary is accepted.
+- `summary_input_capacity`: the plain previous-summary plus messages exceeds
+  the model input byte budget; old memory is never silently truncated.
 - `output_truncated`: the completion was cut off or incomplete.
 - `delta_schema_invalid` / `output_empty`: unusable model JSON or no text.
 - `selection_source_unknown` / `selection_target_unknown`: an output ID was not
@@ -515,6 +710,10 @@ the API or Ollama was unreachable. Context errors now expose an allowlisted
   correction/removal, not a token-budget issue.
 - `memory_validation_or_capacity`: the merged result exceeded limits or failed
   validation. Facts are not evicted to force the update through.
+
+Selection/citation/target reasons above belong to the retained older extractor,
+not the default simple-summary path. A **503** means the shared inference slot
+is busy, not that validation failed or a summary was accepted.
 
 Rejected-output logs also include prompt/completion token counts. Smaller batches
 can reduce extraction complexity or output truncation, but cannot guarantee valid
@@ -580,6 +779,11 @@ a guarantee that the model extracted every relevant fact.
 > at INFO and may itself refer to private facts; protect and rotate those logs.
 
 ## Test
+
+`tests/test_simple_context.py` covers the default summary shape, backwards input
+projection, bounded outputs, private traces and the shared busy-request gate.
+`tests/test_simple_context_quality_live.py` is the opt-in synthetic model check;
+its observed omission is documented above, not hidden by weakening assertions.
 
 `tests/test_summary_trace.py` uses synthetic data and mocked Ollama transport to
 test phase coverage, faithful wrong-classification traces, disabled-mode privacy,

@@ -27,6 +27,7 @@ TraceStage = Literal[
     "started", "request_received", "previous_prepared", "selection_plan", "inference_request",
     "inference_response", "selection_parsed", "selection_schema_rejected", "resolved_delta",
     "merge_started", "merge_rejected", "merge_result", "review", "response", "failed", "completed",
+    "summary_schema_rejected", "summary_validated",
 ]
 
 

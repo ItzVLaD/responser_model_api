@@ -87,6 +87,7 @@ _SAFE_FAILURE_REASONS = frozenset(MEMORY_FAILURE_REASONS.values()) | {
     "invalid_memory_update", "invalid_output", "output_truncated", "output_empty", "delta_schema_invalid",
     "selection_input_capacity", "selection_source_unknown", "selection_target_unknown", "selection_choice_invalid",
     "trace_write_failed",
+    "summary_schema_invalid", "summary_input_capacity",
 }
 
 
