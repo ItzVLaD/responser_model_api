@@ -38,37 +38,66 @@ categories per fact, evidence records or add/replace/remove operations.
 - interlocutor: their stated age, name, job, work specialty/projects, important
   interests/preferences, boundaries and relevant personal history.
 - agent: the account's stated age, job, interests and relevant experiences.
-- interaction: specific reactions, requests for how to communicate, apologies,
-  recurring misunderstandings and important boundaries between the participants.
+- interaction: significant shared events, growing closeness, specific reactions,
+  communication requests, apologies, misunderstandings and important boundaries.
 - open_threads: genuinely unanswered questions or unfulfilled commitments only.
 - relationship: stage unknown/new/acquaintance/familiar/strained, and a brief
   reason supported by the conversation. Keep unknown if the evidence is unclear.
 
+Record significant shared experiences neutrally, including established adult
+virtual sexual role-play or online intimacy, in one non-graphic interaction note.
+Preserve the event's nature and whether participation was mutual, requested,
+declined or uncertain. A request is not mutual participation; past participation
+is not ongoing consent. Do not turn virtual events into real-world encounters.
+Do not replace a shared intimate event with vague 'content', 'imagination',
+'humor' or 'safety concerns' alone. Record any actual safety disagreement or
+boundary separately without erasing the shared event. Do not introduce judgments
+such as 'inappropriate' or 'needs to be addressed' unless a participant said so;
+attribute their view rather than adopting it as the summary's judgement.
+
+Reassess stage on every update using the newest reciprocal behavior, not simply
+copying the previous label. Earlier conflict alone must not freeze the stage.
+Use familiar for supported mutual comfort/trust or continuing reciprocal closeness;
+acquaintance for growing rapport; new for early contact; strained for current
+unresolved hostility, distancing or pressure against a stated boundary. A boundary
+that is expressed and respected is not by itself relationship strain. Sexual
+content alone is not evidence of strain or proof of trust. When closeness and
+tension can coexist, preserve both in interaction and explain which recent
+evidence supports the overall stage. Mutual warmth or repair may supersede old
+strain, but do not invent a reconciliation or discard current refusals/limits.
+
 Keep actual values and specifics: job title AND what they work on, not 'has a job'.
-Review BOTH participants independently. Preserve useful previous details unless
-the new messages clearly correct or retract them. A later acknowledgement or
-question does not replace a fact. Keep only the final clearly corrected age.
+Review BOTH participants independently. Before finishing, check each speaker's
+stated age, occupation, concrete work specialty/projects, preferences and relevant
+experiences against the actual input. An occupation must not replace the separate
+detail of what the person develops, designs, studies or works on.
+
+SOURCE PRIORITY:
+The previous summary is fallible generated notes, NOT verified source evidence.
+A clear current self-declaration overrides conflicting previous notes about that
+same speaker, even without an explicit correction word. Correct or remove the
+contradicted note; do not retain both values as if both were current. A question,
+hypothetical statement, quotation about somebody else, joke or retracted claim
+does not override a self-declaration. Resolve conflicting current declarations
+chronologically with their retractions; if still ambiguous, preserve uncertainty.
+Preserve useful previous details that are NOT contradicted or retracted. New
+information about one field does not replace unrelated work details, preferences,
+experiences or the other person's profile. A later acknowledgement or question
+does not replace a fact. Keep only the final clearly corrected age.
 Questions about a job are NOT occupations; greetings, 'yes', 'for sure', 'I think',
-generic flirting and filler alone are not durable facts. Do not diagnose people
+isolated generic flirting and filler alone are not durable facts. Reciprocated
+closeness and shared intimate events are not filler. Do not diagnose people
 or infer interests from a question. A promise is not automatically fulfilled.
-Empty fields stay []. Do not invent unknown details or copy the examples below.
+An unknown name is not an open thread unless it was actually asked and unanswered.
+Never invent advice/action items just because a topic sounds sensitive.
+Empty fields stay []. Never fill a missing value from general knowledge, an
+instruction, an illustrative phrase or an assumption about a typical person.
+With no supported details and no useful previous notes, return empty lists.
 Consolidate related notes without losing distinct details. At most 8 notes per
 list, 200 characters per note, 3200 JSON characters total; aim for 150-300 words.
 If nothing significant changed, return the previous summary, not an empty reset.
-
-ILLUSTRATIVE EXAMPLES ONLY -- NOT FACTS ABOUT THE CURRENT CHAT:
-1. INTERLOCUTOR: "I'm 29. I'm a landscape designer; I design roof gardens."
-   Good interlocutor notes: ["Age 29.", "Landscape designer; designs roof gardens."]
-   AGENT: "I'm 24 and a lab technician. I went kayaking on Sunday."
-   Good agent notes: ["Age 24; lab technician.", "Went kayaking on Sunday."]
-2. INTERLOCUTOR: "I'm 73." then "Just kidding." then "I'm 29."
-   Keep "Age 29." Do not retain 73. AGENT asking "What do you do for work?"
-   gives NO agent occupation. If answered, it is not an open thread either.
-3. INTERLOCUTOR: "Please ask follow-up questions. It bothers me when you forget my work."
-   Good interaction note: "Wants attentive follow-up questions; dislikes having to repeat work details."
-   "For sure" adds nothing. "I will send the document" stays pending until
-   later evidence says it was sent; then remove that resolved open thread.
-END EXAMPLES. Use ONLY the previous summary and messages in the actual input.
+Use ONLY source-supported information and uncontradicted previous notes. The
+instructions describe extraction criteria and supply no personal facts to copy.
 """
 
 
@@ -168,7 +197,7 @@ class SimpleContextSummarizer:
         assert isinstance(schema, dict)
         messages = [{"role": "system", "content": SIMPLE_SUMMARY_INSTRUCTIONS}, {"role": "user", "content": payload}]
         options = {"temperature": 0.1, "num_predict": settings.max_output_tokens, "num_ctx": settings.context_window}
-        log.info("summarize: model=%s messages=%d input_bytes=%d has_previous=%s summary_id=%s extraction=simple_summary",
+        log.info("summarize: model=%s messages=%d input_bytes=%d has_previous=%s summary_id=%s extraction=simple_summary guidance=source_priority_no_examples",
                  settings.model_name, len(request.messages), len(payload.encode()), request.previous is not None, summary_id)
         if trace.enabled:
             trace.record("previous_prepared", {"previous": plain_memory_view(request.previous) if request.previous else None})

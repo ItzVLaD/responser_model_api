@@ -16,7 +16,7 @@ from responser_model_api.config import SummarySettings
 from responser_model_api.simple_context import SimpleContextSummarizer
 
 
-def test_twenty_bootstrap_chains_simple_summaries_and_saves_no_proof_metadata(
+def test_thirty_bootstrap_chains_simple_summaries_and_saves_no_proof_metadata(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     reader_source = Path(__file__).resolve().parents[2] / "responser_web_reader" / "src"
@@ -62,7 +62,7 @@ def test_twenty_bootstrap_chains_simple_summaries_and_saves_no_proof_metadata(
 
     store = ContextStore(tmp_path / "context")
     result = ConversationContextManager(store).prepare(Reader(), Api(), chat, "synthetic")
-    assert [len(call["messages"]) for call in inputs] == [20, 20, 20, 20, 20, 18]
+    assert [len(call["messages"]) for call in inputs] == [30, 30, 30, 28]
     assert inputs[0]["previous"] is None
     assert all(call["previous"] == summary for call in inputs[1:])
     assert result.messages == messages[-10:] and result.retrieval_context is None

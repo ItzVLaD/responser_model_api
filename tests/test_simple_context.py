@@ -129,12 +129,91 @@ def test_no_change_summary_keeps_previous_simple_lists(monkeypatch: pytest.Monke
     assert summarizer.summarize(_request(previous)).memory == previous
 
 
-def test_prompt_examples_are_labelled_not_actual_history() -> None:
-    assert "ILLUSTRATIVE EXAMPLES ONLY -- NOT FACTS ABOUT THE CURRENT CHAT" in SIMPLE_SUMMARY_INSTRUCTIONS
-    assert "END EXAMPLES" in SIMPLE_SUMMARY_INSTRUCTIONS
+def test_prompt_has_criteria_without_fictional_profile_examples() -> None:
+    assert "ILLUSTRATIVE EXAMPLES" not in SIMPLE_SUMMARY_INSTRUCTIONS
+    for fictional in ("Age 24", "lab technician", "landscape designer", "roof gardens", "kayaking", "I'm 29", "I'm 73"):
+        assert fictional.casefold() not in SIMPLE_SUMMARY_INSTRUCTIONS.casefold()
     for concept in ("job title AND what they work on", "BOTH participants", "not an empty reset", "Questions about a job are NOT occupations"):
         assert concept in SIMPLE_SUMMARY_INSTRUCTIONS
     assert "landscape" not in simple_input(_request())
+
+
+def test_prompt_prioritizes_current_declarations_without_erasing_unrelated_notes() -> None:
+    prompt = " ".join(SIMPLE_SUMMARY_INSTRUCTIONS.split())
+    for rule in (
+        "previous summary is fallible generated notes, NOT verified source evidence",
+        "current self-declaration overrides conflicting previous notes",
+        "even without an explicit correction word",
+        "do not retain both values as if both were current",
+        "Preserve useful previous details that are NOT contradicted or retracted",
+        "does not replace unrelated work details",
+    ):
+        assert rule in prompt
+
+
+def test_conflicting_previous_notes_are_separate_from_current_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    previous = MemoryContent(agent=["Age 24; lab technician.", "Enjoys cycling."], interlocutor=["Librarian."])
+    original = previous.model_dump_json()
+    updated = {**_summary(), "agent": ["Age 26; photographer.", "Enjoys cycling."]}
+    summarizer, calls = _stub(monkeypatch, json.dumps(updated))
+    result = summarizer.summarize(_request(previous))
+    sent = json.loads(calls[0].content)["messages"]
+    assert "lab technician" not in sent[0]["content"]
+    source = json.loads(sent[1]["content"])
+    assert source["previous"]["agent"] == previous.agent
+    assert source["messages"][1] == {"speaker": "AGENT", "text": "I'm 26 and a photographer."}
+    assert result.memory.agent == updated["agent"]
+    assert previous.model_dump_json() == original
+
+
+def test_summary_guidance_preserves_shared_events_without_moralizing_or_forcing_closeness() -> None:
+    instructions = " ".join(SIMPLE_SUMMARY_INSTRUCTIONS.split())
+    for rule in (
+        "significant shared events", "adult virtual sexual role-play", "non-graphic",
+        "Do not turn virtual events into real-world encounters",
+        "A request is not mutual participation", "not ongoing consent",
+        "Reassess stage on every update", "Earlier conflict alone must not freeze",
+        "Sexual content alone is not evidence of strain",
+        "closeness and tension can coexist", "do not invent a reconciliation",
+        "unknown name is not an open thread",
+    ):
+        assert rule.casefold() in instructions.casefold()
+
+
+@pytest.mark.parametrize("stage", ["familiar", "strained"])
+def test_neutral_intimacy_summary_is_preserved_with_evidence_based_stage(
+    monkeypatch: pytest.MonkeyPatch, stage: str,
+) -> None:
+    summary = {
+        **_summary(),
+        "interaction": [
+            "Both adults acknowledged participating in virtual sexual role-play; this was online, not an in-person encounter.",
+            "A stated boundary remains in effect; past participation does not establish ongoing consent.",
+        ],
+        "relationship": {"stage": stage, "evidence": "Shared closeness and a specific unresolved disagreement coexist."},
+    }
+    previous = MemoryContent.model_validate(summary)
+    before = previous.model_dump_json()
+    summarizer, calls = _stub(monkeypatch, json.dumps(summary))
+    result = summarizer.summarize(SummarizeContextRequest(previous=previous, messages=[
+        Message(sender_type="other", text="Thanks for remembering what we discussed.", raw_id="PRIVATE_CURRENT_ID"),
+    ]))
+    assert result.memory.interaction == summary["interaction"]
+    assert result.memory.relationship.stage == stage  # No keyword-forced stage rewrite.
+    sent = json.loads(json.loads(calls[0].content)["messages"][1]["content"])
+    assert sent["previous"] == plain_memory_view(previous)
+    assert previous.model_dump_json() == before and len(calls) == 1
+
+
+def test_existing_strained_summary_can_be_revised_without_changing_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
+    previous = MemoryContent(interlocutor=["Librarian."], interaction=["An earlier disagreement."],
+                             relationship={"stage": "strained", "evidence": "They argued earlier."})
+    updated = {**_summary(), "interaction": ["They acknowledged the earlier disagreement and expressed renewed mutual trust."],
+               "relationship": {"stage": "familiar", "evidence": "Both explicitly expressed renewed trust after resolving the disagreement."}}
+    summarizer, _ = _stub(monkeypatch, json.dumps(updated))
+    result = summarizer.summarize(_request(previous))
+    assert result.memory.relationship.stage == "familiar"
+    assert previous.relationship.stage == "strained"
 
 
 def test_simple_private_trace_records_real_model_stages(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

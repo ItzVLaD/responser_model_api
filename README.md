@@ -18,16 +18,66 @@ messages labelled `INTERLOCUTOR`, `AGENT` or `SERVICE_EVENT`. It returns:
 - `interlocutor`: stated age/name, work and specialty/projects, preferences,
   boundaries, interests and important background about the other person.
 - `agent`: the account's stated details and relevant experiences.
-- `interaction`: important reactions, communication requests and misunderstandings.
+- `interaction`: significant shared events and closeness, important reactions,
+  communication requests, misunderstandings and boundaries.
 - `open_threads`: genuinely unanswered questions or unfulfilled commitments.
 - `relationship`: stage and a short supported reason, or unknown.
 
 There are **no model-selected IDs, citations, per-fact kinds, or edit operations**.
-Each call returns an updated whole summary. Instructions include explicitly
-labelled examples of useful details, irrelevant filler, separate participants,
-age retractions and resolved promises. Examples are not current-chat facts.
-Previous useful notes should be retained unless corrected, but this is a model
-task now—not a deterministic guarantee that untargeted facts survive.
+Each call returns an updated whole summary. Instructions specify extraction
+criteria without fictional biographies, dialogue examples or example fact lists.
+A production trace showed a previously included demonstration fact copied into
+the first summary and then preserved through subsequent batches; labelling it
+"examples only" was insufficient. Those concrete examples have been removed.
+
+The previous summary is explicitly treated as **fallible generated notes**. Clear
+current self-declarations take precedence over conflicting notes about the same
+speaker, without requiring a correction keyword. Questions, hypothetical claims,
+third-party quotations and retracted jokes do not get that priority. Useful
+uncontradicted work details, preferences, experiences and the other participant's
+profile should survive each update. These are model instructions, not a
+deterministic truth check or preservation guarantee. No new model call or
+source-proof metadata is added. Logs identify the revision with
+`guidance=source_priority_no_examples`.
+
+### Shared events and current relationship state
+
+Significant shared intimacy is retained as a neutral, non-graphic event, including
+established adult online/virtual role-play. It must not be generalized into only
+"imagination", "humor", "content" or "safety concerns". The summary distinguishes
+requests, declines, uncertainty and reciprocal participation; virtual events
+must not become claimed in-person encounters. Participant judgments are attributed,
+not adopted as labels such as "inappropriate" by the summarizer. Boundaries and
+actual disagreements are recorded separately without erasing the shared event.
+
+The stage is reassessed against recent reciprocal behavior on each update. Past
+conflict alone must not freeze `strained`; supported renewed mutual comfort or
+repair can justify `familiar`. Conversely, participation in an intimate exchange
+does not establish unrestricted consent or resolve an ongoing disagreement.
+Closeness and tension can coexist, so `interaction` and the stage's `evidence`
+should preserve both. A respected boundary is not automatically strain; current
+hostility, distancing or pressure against a boundary can be. Reply guidance treats
+the saved stage as historical evidence, not a permanent instruction to keep distant.
+Unknown information such as an unasked name is not automatically an open thread.
+
+Two recorded Test User summary batches were checked: their complete messages
+reached inference, outputs stopped normally, and the final trace matched saved
+memory. The model omitted the reciprocal online event while retaining conflict
+and general safety framing. The later batch also contained a current boundary
+disagreement, so omission was verified but an automatic `familiar` replacement
+was not justified. No saved file was edited by this fix.
+
+Non-graphic synthetic live evaluations on local Qwen both passed (about 177 s
+total): explicit shared online intimacy and mutual repair retained the event and
+updated old strain to familiarity; unilateral request/refusal/continued pressure
+remained strained. These two cases are not a guarantee for arbitrary transcripts.
+Enable them with `RESPONSER_RUN_RELATIONSHIP_MEMORY_LIVE_TESTS=1`.
+
+Restart the API to apply the new summary and reply guidance. Existing omissions
+before the checkpoint cannot be recovered from a later raw tail; restoring them
+requires a separately authorized re-summary/rebuild from original history or
+recorded trace input. The current context schema, model, budgets, default summary
+mode, batching rules, and stored data remain unchanged.
 
 Output limits are eight notes per list, 200 characters per note, **3,200 JSON
 characters / 8,000 UTF-8 bytes** for the whole summary. The prompt aims for
@@ -38,13 +88,12 @@ those unused fields from newly saved simple memory, leaving only the five
 summary fields plus its existing checkpoint envelope.
 
 **Batching:** the trigger remains **more than 30** unsummarized messages and
-the latest **10** remain raw. Only first-time imports with **more than 40 total
-messages and no saved context** use batches capped at 20 (or a smaller configured
-batch limit). New 31–40-message chats and existing-context updates keep the
-configured normal batch size, default 30. An initial 128-message history becomes
-six summary calls: 20 + 20 + 20 + 20 + 20 + 18, followed by the latest 10 raw turns.
-Byte-budget fragmentation and all-or-none checkpoint commits remain unchanged.
-More, smaller calls can improve tractability but may increase total import time.
+the latest **10** remain raw. Initial imports and later updates both use
+`RESPONSER_CONTEXT_BATCH_SIZE`, default **30**; there is no special 20-message
+bootstrap cap. An initial 128-message history summarizes 118 messages in
+**30 + 30 + 30 + 28**, followed by the latest 10 raw turns. Smaller configured
+limits remain supported. Byte-budget fragmentation can split a batch further;
+original-message counts and all-or-none checkpoint commits are unchanged.
 
 **Existing data:** old fact-backed memory remains loadable. All canonical fact
 text is supplied to the next simple summary without IDs or duplicate previews;
@@ -75,12 +124,36 @@ than running old and new services simultaneously. No timeout or model change was
 used to disguise latency. Prefer `dry_run`; it prevents sending but still writes
 valid summary checkpoints.
 
-**Validation result:** a real-Qwen synthetic 20-message check produced a compact
+**Earlier validation result:** a real-Qwen synthetic 20-message check produced a compact
 336-character summary in about 65 seconds with both ages/jobs and the other's
 work specialty, but omitted a cycling detail. Its strict test failed at that
 assertion; the later correction and example-contamination assertions were not
 reached. This does not establish complete extraction or end-to-end reply speed.
-The opt-in test remains unchanged (`RESPONSER_RUN_SIMPLE_SUMMARY_LIVE_TESTS=1`).
+The revised opt-in suite (`RESPONSER_RUN_SIMPLE_SUMMARY_LIVE_TESTS=1`) now evaluates
+a **30-message** initial batch, a later correction, and a separately seeded
+incorrect previous summary. Contamination, speaker attribution, each required
+detail, source precedence and retention are individual tests sharing model-result
+fixtures. A coverage failure no longer prevents factuality tests or the separate
+correction scenario from running. The false fact used in the correction fixture
+is deliberately in its previous-memory data, never in the production prompt.
+Do not use fail-fast when running this suite if all failure categories are needed.
+
+**Example-free evaluation (2026-09-15): 17 passed, 2 failed**, over three local
+Qwen calls (about 257 seconds total). The 30-message initial summary passed all
+six tested detail checks, example-contamination checks and speaker-attribution
+checks. A later update corrected the age and retained the five tested unrelated
+details. A separate deliberately corrupted previous summary had its false age
+and occupation corrected from current declarations without a correction keyword.
+Remaining failures: the update omitted an explicit follow-up preference, and
+the corrupted-memory repair dropped an unrelated cycling note. Removing prompt
+examples fixes that demonstrated contamination route, not all hallucination or
+forgetting. These failures remain visible; no assertions were weakened.
+
+The recorded Test User inputs were verified to cover the saved 189-message range
+through its existing checkpoint, but **the user chose to defer regeneration**
+after reviewing the remaining failures. No saved context or archive was changed,
+and no replacement preview was generated. Restarting applies the new prompt but
+does not retroactively remove incorrect notes unless later input corrects them.
 
 ## Setup
 

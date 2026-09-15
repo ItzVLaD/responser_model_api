@@ -182,6 +182,18 @@ def test_old_answered_boundary_is_not_treated_as_a_new_signal() -> None:
     assert "changed boundaries" in note
 
 
+def test_persisted_strain_is_not_a_permanent_instruction_to_keep_distance() -> None:
+    memory = MemoryContent(
+        interaction=["They later expressed mutual warmth and acknowledged repairing an earlier disagreement."],
+        relationship=RelationshipState(stage="strained", evidence="A historical disagreement."),
+    )
+    note = _relationship_note(_snapshot(memory, ["I feel comfortable talking with you again and appreciate our conversations."]))
+    assert "Relationship stage: strained" in note  # Do not guess a new stage from keywords.
+    assert "mutual warmth and repair can supersede older strain" in note
+    assert "past intimacy is not ongoing consent" in note
+    assert "respect boundaries" in note and "do not push" in note
+
+
 def test_scraped_system_events_are_not_privileged() -> None:
     snapshot = _snapshot(MemoryContent())
     snapshot.messages += [
